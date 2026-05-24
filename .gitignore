@@ -1,0 +1,35 @@
+# .gitignore
+
+# ── Secrets & credentials ──────────────────
+logs.env
+.env
+*.env
+*.env.local
+
+# ── Données brutes (trop lourdes pour GitHub)
+data/raw/
+data/processed/
+
+# ── Outputs (figures générées)
+outputs/
+
+# ── Cache Open-Meteo
+.cache/
+
+# ── Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+venv/
+.venv/
+*.egg-info/
+
+# ── IDE
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# ── Jupyter
+.ipynb_checkpoints/

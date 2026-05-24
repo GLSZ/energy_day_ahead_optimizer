@@ -1,0 +1,3 @@
+Amélioration 
+
+On récupère les prix du jour que l'on veut optimiser, est ce que c'est réellement possible 
