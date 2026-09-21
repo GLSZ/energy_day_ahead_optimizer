@@ -7,7 +7,7 @@ from datetime import date
    ─────────────────────────────────────────────'''
 
 PRICE_ZONE = "10YFR-RTE------C"   # Zone de prix ENTSO-E : France (RTE)
-TARGET_DATE = date(2026, 4, 26)
+TARGET_DATE = date(2026, 9, 13)
 CURRENCY = "EUR"
 ENERGY_UNIT = "MWh"
 
