@@ -30,7 +30,98 @@ from config import TARGET_DATE, ASSETS
 
 #from config import TARGET_DATE, ASSETS, PATHS if hasattr(__import__('config'), 'PATHS') else None
 
+# ─────────────────────────────────────────────
+# SÉLECTION INTERACTIVE DE LA DATE
+# ─────────────────────────────────────────────
 
+def select_date(cli_date: str = None) -> date:
+    """
+    Résout la date d'optimisation selon la priorité suivante :
+      1. --date en argument CLI  → utilisé directement
+      2. Prompt interactif       → demande à l'utilisateur
+      3. TARGET_DATE dans config → fallback si entrée vide
+
+    La date résolue est patchée dans config.TARGET_DATE avant
+    que les autres modules ne l'importent, ce qui garantit
+    que fetch_prices, fetch_weather, preprocess et optimizer
+    travaillent tous sur la même date sans modification.
+
+    Validation :
+      - Format YYYY-MM-DD obligatoire
+      - Date dans le passé obligatoire (les prix DA futurs
+        ne sont pas disponibles sur ENTSO-E Transparency)
+      - Pas avant 2015-01-01 (début des données ENTSO-E fiables)
+    """
+    import config   # import local pour pouvoir le patcher
+
+    DATE_MIN = date(2015, 1, 1)
+    DATE_MAX = date.today()
+
+    # ── Priorité 1 : argument CLI ─────────────────────────────────────────
+    if cli_date:
+        try:
+            target = date.fromisoformat(cli_date)
+            _validate_date(target, DATE_MIN, DATE_MAX)
+            print(f"\n  Date sélectionnée (CLI) : {target}")
+            config.TARGET_DATE = target
+            return target
+        except ValueError as e:
+            print(f"\n  [ERREUR] Date CLI invalide : {e}")
+            print("  Format attendu : YYYY-MM-DD (ex: 2024-01-15)")
+            sys.exit(1)
+
+    # ── Priorité 2 : prompt interactif ────────────────────────────────────
+    print(f"\n{'─' * 65}")
+    print(f"  SÉLECTION DE LA DATE D'OPTIMISATION")
+    print(f"{'─' * 65}")
+    print(f"  Période disponible : {DATE_MIN} → {DATE_MAX}")
+    print(f"  Date par défaut    : {config.TARGET_DATE}  (TARGET_DATE dans config.py)")
+    print(f"  Format attendu     : YYYY-MM-DD")
+    print()
+
+    while True:
+        raw = input("  Entrez la date [Entrée = date par défaut] : ").strip()
+
+        # Entrée vide → fallback sur TARGET_DATE de config.py
+        if raw == "":
+            target = config.TARGET_DATE
+            print(f"  → Date par défaut retenue : {target}")
+            break
+
+        # Validation du format et de la plage
+        try:
+            target = date.fromisoformat(raw)
+            _validate_date(target, DATE_MIN, DATE_MAX)
+            print(f"  → Date sélectionnée : {target}")
+            break
+        except ValueError as e:
+            print(f"  [ERREUR] {e} — réessaie")
+
+    # Patch de config pour tous les modules importés ensuite
+    config.TARGET_DATE = target
+    return target
+
+
+def _validate_date(d: date, date_min: date, date_max: date) -> None:
+    """
+    Valide qu'une date est dans la plage acceptable.
+    Lève ValueError avec un message explicite sinon.
+    """
+    if not isinstance(d, date):
+        raise ValueError(f"Format invalide — attendu YYYY-MM-DD")
+
+    if d < date_min:
+        raise ValueError(
+            f"Date trop ancienne : {d} "
+            f"(minimum : {date_min})"
+        )
+
+    if d >= date_max:
+        raise ValueError(
+            f"Date dans le futur ou aujourd'hui : {d} "
+            f"(les prix DA ne sont disponibles que pour des dates passées)"
+        )
+    
 # ─────────────────────────────────────────────
 # UTILITAIRES
 # ─────────────────────────────────────────────
@@ -62,6 +153,14 @@ def _ensure_dirs():
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Day-Ahead Production Asset Optimizer"
+    )
+    parser.add_argument(
+        "--date",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Date d'optimisation (ex: 2024-01-15). "
+             "Si absent : prompt interactif au lancement."
     )
     parser.add_argument(
         "--skip-fetch",
@@ -212,6 +311,8 @@ def main():
         config.TARGET_DATE = target_date
     else:
         target_date = TARGET_DATE
+
+    target_date = select_date(cli_date=args.date)
 
     _header(
         f"DAY-AHEAD PRODUCTION ASSET OPTIMIZER\n"
