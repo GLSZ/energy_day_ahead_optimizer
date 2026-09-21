@@ -182,12 +182,14 @@ def parse_args():
         action="store_true",
         help="Saute la visualisation"
     )
+    '''
     parser.add_argument(
         "--date",
         type=str,
         default=None,
         help="Date à optimiser au format YYYY-MM-DD (défaut : TARGET_DATE dans config.py)"
     )
+    '''
     return parser.parse_args()
 
 
