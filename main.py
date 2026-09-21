@@ -26,7 +26,9 @@ from datetime import datetime, date
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from config import TARGET_DATE, ASSETS, PATHS if hasattr(__import__('config'), 'PATHS') else None
+from config import TARGET_DATE, ASSETS
+
+#from config import TARGET_DATE, ASSETS, PATHS if hasattr(__import__('config'), 'PATHS') else None
 
 
 # ─────────────────────────────────────────────
