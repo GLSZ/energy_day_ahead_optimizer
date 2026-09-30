@@ -47,7 +47,7 @@ LOCATION = {
 ASSETS = {
 
     "nuclear": {
-        "capacity_min" : 700, # MW  — must-run élevé (contrainte technique)
+        "capacity_min" : 300, # MW  — must-run élevé (contrainte technique)
         "capacity_max" : 1500, # MW
         "ramp_up" : 50, #MWh faible : réacteur peu flexible 
         "ramp_down" : 50, 
