@@ -358,7 +358,18 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
     # On suppose qu'au slot 0, le nucléaire tourne déjà à capacity_min.
 
     # Condition initiale implicite : P[nuclear][0] ≥ pmin (déjà dans lowBound)
-    # Pas de contrainte supplémentaire nécessaire ici.
+    # Pas de contrainte supplémentaire nécessaire ici.^
+
+    # -- C6 --- 
+    for t in SLOTS:
+    demand_t = df["demand_mw"].iloc[t]
+    prob += (
+        pulp.lpSum(P[asset][t] for asset in ASSETS_DISPATCH
+                   if asset != "battery")
+        + pulp.value_or_zero(P["battery"][t])
+        <= demand_t,
+        f"Demand_balance_{t}",
+    )
 
     print(f"\n[LP] Total contraintes : {n_constraints}")
     print(f"[LP] Modèle prêt : {len(prob.variables())} variables, "

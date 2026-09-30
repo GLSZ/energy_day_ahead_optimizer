@@ -286,7 +286,8 @@ def compute_gas_marginal_cost(
 
 def build_optimizer_input(
         df : pd.DataFrame,
-        gas_srmc : float
+        gas_srmc : float,
+        load_data: dict,   
 ) -> pd.DataFrame:
     
     """
@@ -395,6 +396,8 @@ def build_optimizer_input(
     out["gas_profitable"] = out["clean_spark_spread"] > 0
     out["hydro_profitable"] = out["da_price_eur_mwh"] > ASSETS["hydro_reservoir"]["marginal_cost"]
 
+    out["demand_mw"] = load_data["forecast_margined"].values
+
     print(f"\n[BUILD] DataFrame optimiseur construit — {len(out)} slots × {len(out.columns)} colonnes")
     print(f"  Clean spark spread moyen   : {out['clean_spark_spread'].mean():.2f} €/MWh")
     print(f"  Slots où gaz rentable      : {out['gas_profitable'].sum()}/96")
@@ -431,6 +434,7 @@ def validate_optimizer_input(df: pd.DataFrame) -> None:
         "wind_pmin",    "wind_pmax",
         "solar_pmin",   "solar_pmax",
         "battery_pmin", "battery_pmax",
+        "demand_mw", 
     ]
     for col in critical_cols:
         if col not in df.columns:
@@ -463,6 +467,17 @@ def validate_optimizer_input(df: pd.DataFrame) -> None:
     if not solar_over.empty:
         print(f"[WARN] {len(solar_over)} slots avec solar_pmax > capacity_max installée")
 
+    #check cohérence demande 
+    demand_max = df["demand_mw"].max()
+    nuclear_max = ASSETS["nuclear"]["capacity_max"]
+
+    if df["demand_mw"].min() < nuclear_max:
+        print(
+            f"[WARN] Demande minimale ({df['demand_mw'].min():,.0f} MW) "
+            f"< capacité nucléaire must-run ({nuclear_max:,.0f} MW)\n"
+            f"       Le nucléaire seul dépasse la demande sur certains slots — "
+            f"vérifie la zone de prix ou la marge de sécurité"
+        )
     print("[VALIDATE] OK — DataFrame prêt pour l'optimiseur\n")
 
 '''
@@ -511,6 +526,12 @@ def run_preprocessing(
     prices  = load_prices(data_dir)
     weather = load_weather(data_dir)
 
+    from fetch_demand import run_fetch_demand
+    load_data = run_fetch_demand(
+        target_date=TARGET_DATE,
+        fetch_actual=True,    # récupère aussi la charge réelle pour comparaison
+        margin_pct=0.05,      # +5% de marge de sécurité opérationnelle
+    )
     # Étape 2 : alignement
     df = align_series(prices, weather)
 
@@ -519,7 +540,7 @@ def run_preprocessing(
     gas_srmc  = compute_gas_marginal_cost(ttf_price)
 
     # Étape 4 : construction DataFrame optimiseur
-    df_opt = build_optimizer_input(df, gas_srmc)
+    df_opt = build_optimizer_input(df, gas_srmc, load_data)
 
     # Étape 5 : validation
     validate_optimizer_input(df_opt)
