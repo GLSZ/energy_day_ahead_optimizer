@@ -225,8 +225,23 @@ def fetch_load_actual(
     n = len(actual)
     if n in (23, 24, 25):
         actual = _upsample_to_15min(actual, target_date)
-    elif n not in range(92, 101):
+    #elif n not in range(92, 101):
+        #raise ValueError(f"Nombre de valeurs inattendu pour la charge réelle : {n}")
+    elif n in range(80, 101):
+        print(f"[ENTSO-E] Données 15min détectées ({n} slots)")
+        if n != 96:
+            # Construit l'index 15min complet — nécessaire pour _pad_to_96_slots
+            start_ts   = pd.Timestamp(target_date, tz="Europe/Paris")
+            end_ts     = pd.Timestamp(target_date + timedelta(days=1), tz="Europe/Paris")
+            full_index = pd.date_range(
+                start=start_ts, end=end_ts,
+                freq="15min", inclusive="left"
+            )
+            actual.index = full_index[:n]
+            actual       = _pad_to_96_slots(actual, target_date)
+    elif n not in range(80, 101):
         raise ValueError(f"Nombre de valeurs inattendu pour la charge réelle : {n}")
+
 
     actual.index = range(len(actual))
     actual.name  = "load_actual_mw"
@@ -307,14 +322,14 @@ def _validate_load(series: pd.Series) -> None:
     LOAD_MIN_MW = 20_000    # MW — en dessous : données suspectes
     LOAD_MAX_MW = 120_000   # MW — au-dessus : données suspectes
 
-    print("DEBUG type:", type(series))
-    print("DEBUG shape:", series.shape)
-    print("DEBUG columns:", getattr(series, "columns", None))
+    #print("DEBUG type:", type(series))
+    #print("DEBUG shape:", series.shape)
+    #print("DEBUG columns:", getattr(series, "columns", None))
 
     # Sécurité : force en Series si DataFrame
     if isinstance(series, pd.DataFrame):
         series = series.iloc[:, 0]
-        
+
     if series.isnull().any():
         n_null = series.isnull().sum()
         raise ValueError(f"{n_null} valeurs NaN dans la courbe de charge")
