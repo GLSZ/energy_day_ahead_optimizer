@@ -214,11 +214,16 @@ def plot_dispatch(df_res: pd.DataFrame, output_dir: str):
     La courbe rouge en surimpression = prix DA (axe droit) pour montrer
     la corrélation entre prix élevés et dispatch du gaz / décharge batterie.
 
+    La ligne pointillée rouge = borne de demande (part de marché × charge France)
+    → permet de visualiser quand la contrainte C6 est active.
+
     La zone de charge batterie (P < 0) est affichée séparément en bas.
     """
+    from matplotlib.lines import Line2D
+
     hours  = _slots_to_hours(df_res["slot"])
 
-    # Actifs producteurs (P ≥ 0) dans l'ordre des couches
+    # Actifs producteurs (P ≥ 0) dans l'ordre des couches (merit order)
     stack_assets = ["solar", "wind", "nuclear", "hydro", "battery", "gas"]
 
     # Sépare la batterie : décharge (positive) vs charge (négative)
@@ -242,33 +247,71 @@ def plot_dispatch(df_res: pd.DataFrame, output_dir: str):
         if col not in df_res.columns:
             continue
         values = df_res[col].clip(lower=0).values   # garde uniquement P ≥ 0
-        ax1.fill_between(hours, bottoms, bottoms + values,
-                         color=COLORS[asset], alpha=0.85,
-                         label=ASSET_LABELS[asset], step="pre")
+        ax1.fill_between(
+            hours, bottoms, bottoms + values,
+            color=COLORS[asset], alpha=0.85,
+            label=ASSET_LABELS[asset], step="pre"
+        )
         bottoms += values
 
-    # Courbe prix DA sur axe droit
+    # ── Borne de demande (contrainte C6) ─────────────────────────────────
+    # Ligne pointillée rouge = plafond de production autorisé
+    # Quand la production empilée touche cette ligne → contrainte active
+    # Quand elle est en dessous → contrainte relâchée (ex: nuit)
+    if "demand_mw" in df_res.columns:
+        from config import MARKET_SHARE
+        borne_demande = df_res["demand_mw"] * MARKET_SHARE
+        # Même protection anti-infeasible que dans optimizer.py
+        nuclear_must_run = 750   # 700 MW must-run + 50 MW de marge
+        borne_demande = borne_demande.clip(lower=nuclear_must_run)
+
+        ax1.plot(
+            hours, borne_demande.values,
+            color="red", linewidth=2, linestyle="--",
+            label=f"Borne demande ({MARKET_SHARE*100:.0f}% charge France)",
+            zorder=5,
+        )
+
+    # ── Courbe prix DA sur axe droit ──────────────────────────────────────
     ax_price = ax1.twinx()
-    ax_price.plot(hours, df_res["da_price"], color=COLORS["price"],
-                  linewidth=2, linestyle="--", label="Prix DA", alpha=0.8)
+    ax_price.plot(
+        hours, df_res["da_price"],
+        color=COLORS["price"], linewidth=2,
+        linestyle="--", label="Prix DA", alpha=0.8
+    )
     ax_price.set_ylabel("Prix DA (€/MWh)", color=COLORS["price"])
     ax_price.tick_params(axis="y", labelcolor=COLORS["price"])
 
     ax1.set_ylabel("Puissance (MW)")
     ax1.set_title("Production par actif (empilée)", loc="left", fontsize=11)
 
-    # Légende
+    # ── Légende combinée ──────────────────────────────────────────────────
+    # Patches pour les actifs (stacked area)
     handles = [
         mpatches.Patch(color=COLORS[a], label=ASSET_LABELS[a])
         for a in stack_assets if f"P_{a}_mw" in df_res.columns
     ]
+
+    # Ligne pour la borne de demande
+    if "demand_mw" in df_res.columns:
+        from config import MARKET_SHARE
+        handles.append(
+            Line2D(
+                [0], [0],
+                color="red", linewidth=2, linestyle="--",
+                label=f"Borne demande ({MARKET_SHARE*100:.0f}%)"
+            )
+        )
+
     ax1.legend(handles=handles, loc="upper left", ncol=3)
 
     # ── Partie basse : charge batterie (P < 0) ────────────────────────────
     # Montre quand la batterie consomme de l'énergie (charge depuis le réseau)
-    ax2.fill_between(hours, bat_charge.values, 0,
-                     color=COLORS["battery"], alpha=0.6,
-                     label="Charge batterie", step="pre")
+    ax2.fill_between(
+        hours, bat_charge.values, 0,
+        color=COLORS["battery"], alpha=0.6,
+        label="Charge batterie", step="pre"
+    )
     ax2.axhline(0, color="black", linewidth=0.6)
     ax2.set_ylabel("Charge (MW)", color=COLORS["battery"])
     ax2.set_title("Charge batterie", loc="left", fontsize=10)
@@ -281,7 +324,6 @@ def plot_dispatch(df_res: pd.DataFrame, output_dir: str):
 
     plt.tight_layout()
     _save(fig, output_dir, "02_dispatch_stack")
-
 
 # ─────────────────────────────────────────────
 # FIGURE 3 — Production par actif (MWh)

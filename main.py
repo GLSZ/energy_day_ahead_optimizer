@@ -225,8 +225,12 @@ def step_preprocess() -> object:
     _success(f"DataFrame optimiseur : {len(df)} slots × {len(df.columns)} colonnes")
     _success(f"Clean spark spread moy : {df['clean_spark_spread'].mean():.2f} €/MWh")
     _success(f"Slots gaz rentable     : {df['gas_profitable'].sum()}/96")
+    # ← NOUVEAU
+    if "demand_mw" in df.columns:
+        from config import MARKET_SHARE
+        _success(f"Borne demande moy      : {df['demand_mw'].mean() * MARKET_SHARE:,.0f} MW "
+                 f"({MARKET_SHARE*100:.0f}% × {df['demand_mw'].mean():,.0f} MW charge France)")
     return df
-
 
 def step_optimize() -> object:
     from optimizer import run_optimization
