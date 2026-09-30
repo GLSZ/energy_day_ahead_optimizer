@@ -478,6 +478,8 @@ def extract_results(
             "datetime" : df["datetime"].iloc[t],
             "da_price" : price_t
         }
+        if "demand_mw" in df.columns:
+            row["demand_mw"] = df["demand_mw"].iloc[t]
 
         total_production_mw = 0.0
         total_revenue       = 0.0

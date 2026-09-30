@@ -221,6 +221,9 @@ def plot_dispatch(df_res: pd.DataFrame, output_dir: str):
     """
     from matplotlib.lines import Line2D
 
+    print("[DEBUG] Colonnes df_res :", df_res.columns.tolist())
+    print("[DEBUG] 'demand_mw' présent :", "demand_mw" in df_res.columns)
+
     hours  = _slots_to_hours(df_res["slot"])
 
     # Actifs producteurs (P ≥ 0) dans l'ordre des couches (merit order)
