@@ -711,9 +711,12 @@ def plot_merit_order(df_res: pd.DataFrame, df_opt: pd.DataFrame, output_dir: str
 '''
 
 def _save(fig: plt.Figure, output_dir: str, name: str):
-    """Sauvegarde en PNG haute résolution et affiche."""
-    os.makedirs(output_dir, exist_ok=True)
-    filepath = os.path.join(output_dir, f"{name}_{TARGET_DATE}.png")
+    """Sauvegarde en PNG dans un sous-dossier par date."""
+    # Crée le sous-dossier outputs/figures/YYYY-MM-DD/
+    date_dir = os.path.join(output_dir, str(TARGET_DATE))
+    os.makedirs(date_dir, exist_ok=True)
+
+    filepath = os.path.join(date_dir, f"{name}.png")   # plus de date dans le nom
     fig.savefig(filepath, dpi=150, bbox_inches="tight",
                 facecolor="white", edgecolor="none")
     print(f"[SAVE] {filepath}")
@@ -731,6 +734,7 @@ def run_visualization(
 ):
     print("=" * 60)
     print(f"VISUALISATION — {TARGET_DATE}")
+    print(f"Figures → {output_dir}/{TARGET_DATE}/")
     print("=" * 60)
 
     df_res = load_results(results_dir)
