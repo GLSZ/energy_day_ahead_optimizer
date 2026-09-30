@@ -360,16 +360,44 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
     # Condition initiale implicite : P[nuclear][0] ≥ pmin (déjà dans lowBound)
     # Pas de contrainte supplémentaire nécessaire ici.^
 
-    # -- C6 --- 
+    # ── C6 : Contrainte de demande (part de marché) ───────────────────────
+    #
+    # Le portefeuille ne peut produire que sa part de la demande totale.
+    # Sans cette contrainte, l'optimiseur produit au maximum dès que
+    # prix_DA > coût_marginal — ce qui est irréaliste.
+    #
+    # Formulation :
+    #   Σ_a P(a,t) ≤ demand(t) × MARKET_SHARE    pour tout t
+    #
+    # La batterie est incluse dans le lpSum : en charge (P < 0) elle
+    # réduit la production nette et relâche naturellement la contrainte.
+    #
+    # Protection anti-infeasible : la borne ne peut pas descendre sous
+    # le must-run nucléaire (700 MW), sinon le LP devient infaisable.
+
+    from config import MARKET_SHARE
+
+    nuclear_must_run = ASSETS["nuclear"]["capacity_min"]   # 700 MW
+    c6_count = 0
+
     for t in SLOTS:
-    demand_t = df["demand_mw"].iloc[t]
-    prob += (
-        pulp.lpSum(P[asset][t] for asset in ASSETS_DISPATCH
-                   if asset != "battery")
-        + pulp.value_or_zero(P["battery"][t])
-        <= demand_t,
-        f"Demand_balance_{t}",
-    )
+        demand_t  = df["demand_mw"].iloc[t]
+        borne_t   = demand_t * MARKET_SHARE
+
+        # Garantit que la borne est toujours ≥ must-run nucléaire + marge
+        borne_t   = max(borne_t, nuclear_must_run + 50)
+
+        prob += (
+            pulp.lpSum(P[asset][t] for asset in ASSETS_DISPATCH) <= borne_t,
+            f"Demand_market_share_{t}",
+        )
+        c6_count += 1
+
+    n_constraints += c6_count
+    print(f"[LP] C6 Demande (share={MARKET_SHARE*100:.0f}%) : "
+          f"{c6_count} contraintes  "
+          f"(borne moy : {df['demand_mw'].mean() * MARKET_SHARE:,.0f} MW  "
+          f"min protégée : {nuclear_must_run + 50:,.0f} MW)")
 
     print(f"\n[LP] Total contraintes : {n_constraints}")
     print(f"[LP] Modèle prêt : {len(prob.variables())} variables, "

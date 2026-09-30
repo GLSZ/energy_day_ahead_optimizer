@@ -406,7 +406,11 @@ def save_load(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    df = forecast.to_frame()
+    forecast_col = forecast.copy()
+    forecast_col.name = "load_forecast_mw"   # ← nom fixe dans le CSV
+
+    # df = forecast.to_frame()
+    df = forecast_col.to_frame()
 
     if actual is not None:
         # Aligne la charge réelle sur le même index

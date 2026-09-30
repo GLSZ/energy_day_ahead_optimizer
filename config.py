@@ -154,3 +154,12 @@ GAS_EFFICIENCY_CCGT = 0.58    # rendement thermique du cycle combiné (58%)
 SOLVER = 'PULP_CBC_CMD' #"CBC"          # solver open-source livré avec PuLP (CBC de COIN-OR)
 TIME_HORIZON = 24       # heures (journée complète Day-Ahead)
 HOURS = list(range(TIME_HORIZON))
+
+# ─────────────────────────────────────────────
+# PARAMÈTRES DE MARCHÉ
+# ─────────────────────────────────────────────
+
+# Part de marché du portefeuille sur la demande française
+# Engie représente ~15-20% de la production française
+# On modélise ici un portefeuille de taille intermédiaire
+MARKET_SHARE = 0.10   # 10% de la demande France → contrainte réaliste
