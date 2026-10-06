@@ -288,6 +288,34 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
     # → la contrainte force l'hydro à n'être utilisé qu'aux heures de pic.
     # C'est son rôle économique : réserve flexible pour les pointes.
 
+    '''
+    C3a : Bilan volumique réservoir amont (slot par slot)
+      V_res(t+1) = V_res(t) - Q_turb(t) + Q_apport(t) - Q_debit_reserve
+      → le volume évolue à chaque slot selon turbinage, apports, débit réservé
+
+    C3b : Niveaux min/max réservoir amont
+        level_env_min ≤ V_res(t) ≤ level_max    pour tout t
+
+    C3c : Bilan volumique bassin aval avec délai d'écoulement
+        V_aval(t+1) = V_aval(t) + Q_turb(t - delay) - Q_pompage(t)
+        → l'eau turbinée arrive dans le bassin aval avec un délai
+
+    C3d : Niveaux min/max bassin aval
+        level_env_min_aval ≤ V_aval(t) ≤ level_max_aval
+
+    C3e : Lien puissance turbinée ↔ volume turbiné
+        Q_turb(t) = P_hydro(t) × SLOT_DURATION_H / mwh_per_hm3
+
+    C3f : STEP — bilan de pompage
+        Q_pompe(t) = P_step_pump(t) × SLOT_DURATION_H × hm3_per_mwh_pumped
+
+    C3g : Débit réservé minimum (environnemental)
+        Q_turb(t) ≥ min_flow_hm3_per_slot    pour tout t
+
+    C3h : Niveau cible fin de journée (optionnel)
+        V_res(95) ≥ level_target_hm3
+    '''
+    '''
     hydro_budget = ASSETS["hydro_reservoir"]["daily_energy_budget"]
 
     prob += (
@@ -296,7 +324,167 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
     )
     n_constraints += 1
     print(f"[LP] C3 Budget hydro : 1 contrainte (budget={hydro_budget} MWh/j)")
+    '''
 
+    # ── Variables hydrauliques avancées ──────────────────────────────────
+    from config import HYDRO
+
+    # Volume réservoir amont (Hm³) — état du lac slot par slot
+    V_res = {}
+    for t in SLOTS:
+        V_res[t] = pulp.LpVariable(
+            name     = f"V_res_{t}",
+            lowBound = HYDRO["reservoir"]["level_env_min_hm3"],  # 10 Hm³
+            upBound  = HYDRO["reservoir"]["level_max_hm3"],      # 47.5 Hm³
+            cat      = "Continuous",
+        )
+
+    # Volume bassin aval (Hm³)
+    V_aval = {}
+    for t in SLOTS:
+        V_aval[t] = pulp.LpVariable(
+            name     = f"V_aval_{t}",
+            lowBound = HYDRO["lower_basin"]["level_env_min_hm3"],  # 2 Hm³
+            upBound  = HYDRO["lower_basin"]["level_max_hm3"],      # 9.5 Hm³
+            cat      = "Continuous",
+        )
+
+    # Puissance de pompage STEP (MW) — toujours positive
+    # La STEP consomme quand elle pompe → comptée comme charge dans le bilan
+    P_pump = {}
+    for t in SLOTS:
+        P_pump[t] = pulp.LpVariable(
+            name     = f"P_pump_{t}",
+            lowBound = 0,
+            upBound  = HYDRO["step"]["pump_capacity_mw"],   # 100 MW
+            cat      = "Continuous",
+        )
+
+
+    # ── C3 : Modélisation hydraulique avancée ─────────────────────────────
+    from config import HYDRO
+
+    mwh_per_hm3      = HYDRO["mwh_per_hm3"]           # 245 MWh/Hm³
+    min_flow         = HYDRO["min_flow_hm3_per_slot"]  # 0.002 Hm³/slot
+    flow_delay       = HYDRO["flow_delay_slots"]       # 2 slots
+    pump_eff         = HYDRO["step"]["pump_efficiency"]        # 0.88
+    hm3_per_mwh_pump = HYDRO["step"]["hm3_per_mwh_pumped"]    # 0.0046
+
+    c3_count = 0
+
+    # ── C3a : Condition initiale réservoir amont ──────────────────────────
+    prob += (
+        V_res[0] == HYDRO["reservoir"]["level_initial_hm3"],
+        "Hydro_res_init",
+    )
+    c3_count += 1
+
+    # ── C3b : Condition initiale bassin aval ──────────────────────────────
+    prob += (
+        V_aval[0] == HYDRO["lower_basin"]["level_initial_hm3"],
+        "Hydro_aval_init",
+    )
+    c3_count += 1
+
+    # ── C3c/C3d : Bilan volumique slot par slot ───────────────────────────
+    #
+    # Réservoir amont :
+    #   V_res(t+1) = V_res(t)
+    #              - Q_turb(t)          [eau turbinée vers l'aval]
+    #              + Q_apport(t)        [pluie → ruissellement]
+    #              - min_flow           [débit réservé obligatoire]
+    #              + Q_pompe(t)         [eau remontée par la STEP]
+    #
+    # où Q_turb(t) = P_hydro(t) × SLOT_DURATION_H / mwh_per_hm3
+    #    Q_pompe(t) = P_pump(t) × SLOT_DURATION_H × hm3_per_mwh_pump
+
+    for t in SLOTS[:-1]:
+        q_turb_t   = P["hydro"][t] * SLOT_DURATION_H / mwh_per_hm3
+        q_apport_t = df["hydro_inflow_hm3"].iloc[t]
+        q_pompe_t  = P_pump[t] * SLOT_DURATION_H * hm3_per_mwh_pump
+
+        # Bilan réservoir amont
+        prob += (
+            V_res[t+1] == V_res[t]
+                        - q_turb_t
+                        + q_apport_t
+                        - min_flow
+                        + q_pompe_t,
+            f"Hydro_res_balance_{t}",
+        )
+
+        # Bilan bassin aval avec délai d'écoulement
+        # L'eau turbinée au slot t arrive dans l'aval au slot t + flow_delay
+        # Pour les premiers slots où t - flow_delay < 0 → pas d'arrivée
+        t_source = t - flow_delay
+        if t_source >= 0:
+            q_arrive_t = P["hydro"][t_source] * SLOT_DURATION_H / mwh_per_hm3
+        else:
+            q_arrive_t = 0.0   # pas encore arrivé au début de journée
+
+        prob += (
+            V_aval[t+1] == V_aval[t]
+                         + q_arrive_t    # eau arrivant de l'amont
+                         - q_pompe_t,   # eau remontée par la STEP
+            f"Hydro_aval_balance_{t}",
+        )
+        c3_count += 2
+
+    # ── C3e : Débit réservé minimum (contrainte environnementale) ─────────
+    #
+    # À chaque slot, le turbinage doit être suffisant pour garantir
+    # le débit réservé dans la rivière (obligation légale).
+    # Q_turb(t) × mwh_per_hm3 / SLOT_DURATION_H ≥ min_flow
+    # → P_hydro(t) ≥ min_flow × mwh_per_hm3 / SLOT_DURATION_H
+
+    min_power_env = min_flow * mwh_per_hm3 / SLOT_DURATION_H  # MW
+
+    for t in SLOTS:
+        prob += (
+            P["hydro"][t] >= min_power_env,
+            f"Hydro_env_flow_{t}",
+        )
+        c3_count += 1
+
+    # ── C3f : Niveau cible fin de journée (optionnel) ─────────────────────
+    #
+    # Évite de vider complètement le réservoir en fin de journée.
+    # Le gestionnaire du barrage doit planifier pour le lendemain.
+    level_target = HYDRO["reservoir"].get("level_target_hm3")
+    if level_target is not None:
+        prob += (
+            V_res[N_SLOTS - 1] >= level_target,
+            "Hydro_res_target_eod",
+        )
+        c3_count += 1
+
+    # ── C3g : Anti-simultanéité turbinage / pompage ───────────────────────
+    #
+    # On ne peut pas turbiner et pomper en même temps sur le même ouvrage.
+    # En LP pur (sans variable binaire), on ajoute une contrainte de somme :
+    #   P_hydro(t) × SLOT_DURATION_H / mwh_per_hm3 + P_pump(t) ≤ max(turb, pump)
+    #
+    # C'est une approximation — la vraie contrainte nécessiterait du MIP.
+    # En pratique, le prix de l'électricité guide naturellement l'arbitrage :
+    # prix haut → turbinage, prix bas → pompage.
+
+    max_combined = max(
+        HYDRO["step"]["turb_capacity_mw"],
+        HYDRO["step"]["pump_capacity_mw"],
+    )
+    for t in SLOTS:
+        prob += (
+            P["hydro"][t] + P_pump[t] <= max_combined,
+            f"Hydro_no_simultaneous_{t}",
+        )
+        c3_count += 1
+
+    n_constraints += c3_count
+    print(f"[LP] C3 Hydro avancé : {c3_count} contraintes")
+    print(f"     Débit réservé    : {min_flow:.4f} Hm³/slot "
+          f"→ {min_power_env:.1f} MW min")
+    print(f"     Délai écoulement : {flow_delay} slots ({flow_delay*15} min)")
+    print(f"     Pompage STEP max : {HYDRO['step']['pump_capacity_mw']} MW")
     # ── C4 : Dynamique de la batterie (bilan d'énergie) ──────────────────
     #
     # L'état de charge évolue slot après slot selon :
@@ -403,7 +591,7 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
     print(f"[LP] Modèle prêt : {len(prob.variables())} variables, "
           f"{len(prob.constraints)} contraintes")
 
-    return prob, P, SOC
+    return prob, P, SOC, V_res, V_aval, P_pump
 
 '''
 # ─────────────────────────────────────────────
@@ -522,6 +710,9 @@ def extract_results(
         row["revenue_eur"]     = round(total_revenue, 2)
         row["fuel_cost_eur"]   = round(total_fuel_cost, 2)
         row["margin_eur"]      = round(total_revenue - total_fuel_cost, 2)
+        row["V_res_hm3"]    = round(pulp.value(V_res[t])  or 0.0, 4)
+        row["V_aval_hm3"]   = round(pulp.value(V_aval[t]) or 0.0, 4)
+        row["P_pump_mw"]    = round(pulp.value(P_pump[t])  or 0.0, 3)
 
         results.append(row)
 
@@ -581,9 +772,9 @@ def run_optimization(data_dir: str = "data/processed") -> pd.DataFrame:
     print("=" * 60)
 
     df               = load_optimizer_input(data_dir)
-    prob, P, SOC     = build_lp_model(df)
+    prob, P, SOC, V_res, V_aval, P_pump = build_lp_model(df)
     status           = solve(prob)
-    results_df       = extract_results(df, P, SOC)
+    results_df = extract_results(df, P, SOC, V_res, V_aval, P_pump)
     save_results(results_df, data_dir)
 
     print("=" * 60)

@@ -351,6 +351,15 @@ def build_optimizer_input(
     out["hydro_pmin"] = ASSETS["hydro_reservoir"]["capacity_min"]   # 0 MW
     out["hydro_pmax"] = ASSETS["hydro_reservoir"]["capacity_max"]   # 300 MW
 
+    # Hérités du DataFrame météo via align_series()
+    # Si absent (météo non disponible) → on met 0 (pas d'apport)
+    if "hydro_inflow_hm3" in out.columns:
+        pass   # déjà présent via l'alignement prix × météo
+    else:
+        out["hydro_inflow_hm3"] = 0.0
+        print("[WARN] hydro_inflow_hm3 absent → apports naturels = 0")
+
+
     # Renouvelables — borne sup = puissance météo calculée par fetch_weather.py
     # wind_power_mw et solar_power_mw sont déjà dans df (hérités de l'alignement)
     out["wind_pmin"] = 0.0   # fatal : on ne peut pas forcer la production
@@ -470,6 +479,11 @@ def validate_optimizer_input(df: pd.DataFrame) -> None:
     #check cohérence demande 
     demand_max = df["demand_mw"].max()
     nuclear_max = ASSETS["nuclear"]["capacity_max"]
+
+    # Vérifie que les apports hydro sont non-négatifs
+    if "hydro_inflow_hm3" in df.columns:
+        if (df["hydro_inflow_hm3"] < 0).any():
+            raise ValueError("Apports hydro négatifs détectés")
 
     if df["demand_mw"].min() < nuclear_max:
         print(

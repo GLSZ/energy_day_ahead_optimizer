@@ -132,6 +132,79 @@ ASSETS = {
 }
 
 # ─────────────────────────────────────────────
+# MODÉLISATION HYDRAULIQUE AVANCÉE
+# ─────────────────────────────────────────────
+
+HYDRO = {
+
+    # ── Bassin amont (réservoir principal) ───────────────────────────────
+    "reservoir" : {
+        "capacity_hm3"      : 50.0,    # Hm³ — volume total du lac
+        "level_min_hm3"     : 5.0,     # Hm³ — niveau minimum absolu
+                                        #        (sécurité barrage)
+        "level_max_hm3"     : 47.5,    # Hm³ — niveau maximum exploitation
+                                        #        (2.5 Hm³ de marge sécurité)
+        "level_env_min_hm3" : 10.0,    # Hm³ — niveau minimum environnemental
+                                        #        (débit réservé, directive cadre eau)
+        "level_initial_hm3" : 30.0,    # Hm³ — niveau au début de la journée
+        "level_target_hm3"  : 28.0,    # Hm³ — niveau cible fin de journée
+                                        #        (peut être None = libre)
+    },
+
+    # ── Bassin aval (réservoir STEP basse) ───────────────────────────────
+    "lower_basin" : {
+        "capacity_hm3"      : 10.0,    # Hm³ — plus petit que l'amont
+        "level_min_hm3"     : 1.0,     # Hm³ — minimum absolu
+        "level_max_hm3"     : 9.5,     # Hm³ — maximum exploitation
+        "level_env_min_hm3" : 2.0,     # Hm³ — minimum environnemental aval
+        "level_initial_hm3" : 5.0,     # Hm³ — niveau initial
+    },
+
+    # ── Conversion hydraulique ────────────────────────────────────────────
+    # 1 Hm³ d'eau turbinée → X MWh d'électricité produite
+    # Dépend de la hauteur de chute et du rendement turbine
+    # Formule : E (MWh) = ρ × g × H × η × V / 3600
+    #   ρ = 1000 kg/m³, g = 9.81 m/s², H = hauteur de chute (m)
+    #   η = rendement turbine (~0.90), V = volume (m³)
+    # Pour H=100m, η=0.90 : 1 Hm³ ≈ 245 MWh
+    "mwh_per_hm3"           : 245.0,   # MWh/Hm³ — facteur de conversion turbinage
+
+    # ── Débit réservé (contrainte environnementale) ───────────────────────
+    # Débit minimum à laisser s'écouler en permanence dans la rivière
+    # Obligation légale — Loi sur l'eau de 1992 : 1/40ème du module
+    # Exprimé en Hm³/slot (15min)
+    "min_flow_hm3_per_slot" : 0.002,   # Hm³/slot ≈ 0.13 m³/s en continu
+
+    # ── Temps d'écoulement entre bassins ─────────────────────────────────
+    # L'eau turbinée à l'amont met N slots pour arriver dans le bassin aval
+    # Dépend de la longueur du canal de fuite et de la vitesse d'écoulement
+    # Ex : 2 slots = 30 minutes de transit
+    "flow_delay_slots"      : 2,       # slots (30 min à pas 15min)
+
+    # ── STEP (Station de Transfert d'Énergie par Pompage) ────────────────
+    "step" : {
+        "pump_capacity_mw"   : 100,    # MW — puissance de pompage max
+        "turb_capacity_mw"   : 120,    # MW — puissance de turbinage max
+                                        #       (légèrement > pompage car chute > remontée)
+        "pump_efficiency"    : 0.88,   # rendement pompage (élec → eau)
+        "turb_efficiency"    : 0.90,   # rendement turbinage (eau → élec)
+        "roundtrip_eff"      : 0.79,   # rendement global aller-retour
+                                        #       = pump_eff × turb_eff
+        # Volume pompé par MWh consommé (inverse de mwh_per_hm3 × pump_eff)
+        "hm3_per_mwh_pumped" : 0.0046, # Hm³/MWh pompé
+    },
+
+    # ── Apports naturels (précipitations → ruissellement) ─────────────────
+    # Coefficient de conversion pluie → apport au réservoir
+    # Dépend du bassin versant (surface, perméabilité, végétation)
+    # Surface bassin versant typique : 50-500 km²
+    "catchment_area_km2"    : 150.0,   # km² — surface du bassin versant
+    "runoff_coefficient"    : 0.35,    # fraction des précipitations qui
+                                        # ruissellent vers le réservoir
+                                        # (0.35 = 35%, reste = infiltration/évaporation)
+}
+
+# ─────────────────────────────────────────────
 # PARAMÈTRES CO2
 # ─────────────────────────────────────────────
 
