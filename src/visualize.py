@@ -257,6 +257,23 @@ def plot_dispatch(df_res: pd.DataFrame, output_dir: str):
         )
         bottoms += values
 
+    # ── Partie basse : charge batterie + pompage STEP ─────────────────────
+    ax2.fill_between(hours, bat_charge.values, 0,
+                     color=COLORS["battery"], alpha=0.6,
+                     label="Charge batterie", step="pre")
+
+    # Pompage STEP — si disponible dans les résultats
+    if "P_pump_mw" in df_res.columns:
+        pump = df_res["P_pump_mw"].values * -1   # négatif = consommation
+        ax2.fill_between(hours, pump, 0,
+                         color=COLORS["hydro"], alpha=0.5,
+                         label="Pompage STEP", step="pre")
+
+    ax2.axhline(0, color="black", linewidth=0.6)
+    ax2.set_ylabel("Charge (MW)")
+    ax2.set_title("Charge batterie + Pompage STEP", loc="left", fontsize=10)
+    ax2.legend(loc="lower left", fontsize=8)
+
     # ── Borne de demande (contrainte C6) ─────────────────────────────────
     # Ligne pointillée rouge = plafond de production autorisé
     # Quand la production empilée touche cette ligne → contrainte active
@@ -707,6 +724,143 @@ def plot_merit_order(df_res: pd.DataFrame, df_opt: pd.DataFrame, output_dir: str
     plt.tight_layout()
     _save(fig, output_dir, "06_merit_order_heatmap")
 
+# ─────────────────────────────────────────────
+# FIGURE 7 — Hydraulique : niveaux & pompage
+# ─────────────────────────────────────────────
+
+def plot_hydro(df_res: pd.DataFrame, output_dir: str):
+    """
+    Analyse complète du comportement hydraulique sur la journée :
+    - Panneau 1 : puissance turbinée + pompage STEP + prix DA
+    - Panneau 2 : évolution des niveaux réservoir amont et bassin aval
+    - Panneau 3 : apports naturels (précipitations → ruissellement)
+    """
+    from config import HYDRO
+
+    # Vérifie que les colonnes hydrauliques avancées sont disponibles
+    if "V_res_hm3" not in df_res.columns:
+        print("[SKIP] Figure 7 — colonnes hydrauliques avancées absentes "
+              "(V_res_hm3 manquant)")
+        return
+
+    hours = _slots_to_hours(df_res["slot"])
+
+    fig, (ax1, ax2, ax3) = plt.subplots(
+        3, 1, figsize=(14, 12),
+        gridspec_kw={"height_ratios": [2, 2, 1]},
+        sharex=True,
+    )
+    fig.suptitle(
+        f"Gestion Hydraulique Avancée — {TARGET_DATE}",
+        fontsize=14, fontweight="bold"
+    )
+
+    # ── Panneau 1 : puissance turbinée + pompage + prix DA ────────────────
+    hydro_turb = df_res["P_hydro_mw"].clip(lower=0)
+    ax1.fill_between(hours, 0, hydro_turb,
+                     color=COLORS["hydro"], alpha=0.7,
+                     label="Turbinage (MW)", step="pre")
+
+    if "P_pump_mw" in df_res.columns:
+        pump_neg = df_res["P_pump_mw"] * -1   # affiché vers le bas
+        ax1.fill_between(hours, pump_neg, 0,
+                         color="#0369A1", alpha=0.6,
+                         label="Pompage STEP (MW)", step="pre")
+
+    ax1.axhline(0, color="black", linewidth=0.6)
+
+    # Lignes de capacité min/max
+    min_power_env = (HYDRO["min_flow_hm3_per_slot"]
+                     * HYDRO["mwh_per_hm3"] / 0.25)
+    ax1.axhline(min_power_env, color="orange", linewidth=1.5,
+                linestyle=":", label=f"Débit réservé min ({min_power_env:.1f} MW)")
+    ax1.axhline(HYDRO["step"]["turb_capacity_mw"], color=COLORS["hydro"],
+                linewidth=1, linestyle="--", alpha=0.5,
+                label=f"Capacité max turb ({HYDRO['step']['turb_capacity_mw']} MW)")
+
+    # Prix DA sur axe droit
+    ax1b = ax1.twinx()
+    ax1b.plot(hours, df_res["da_price"], color=COLORS["price"],
+              linewidth=1.8, linestyle="--", alpha=0.7, label="Prix DA")
+    ax1b.set_ylabel("Prix DA (€/MWh)", color=COLORS["price"])
+    ax1b.tick_params(axis="y", labelcolor=COLORS["price"])
+
+    ax1.set_ylabel("Puissance (MW)")
+    ax1.set_title("Turbinage & Pompage STEP", loc="left", fontsize=11)
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax1b.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2,
+               loc="upper left", ncol=2, fontsize=8)
+
+    # ── Panneau 2 : niveaux des réservoirs ────────────────────────────────
+    #
+    # L'évolution du niveau du lac est la signature du comportement
+    # de l'optimiseur : il vide le lac aux heures de prix élevés
+    # (turbinage) et le remonte aux heures creuses (pompage STEP).
+
+    ax2.plot(hours, df_res["V_res_hm3"],
+             color=COLORS["hydro"], linewidth=2.2,
+             label="Réservoir amont (Hm³)", drawstyle="steps-pre")
+    ax2.fill_between(hours, df_res["V_res_hm3"],
+                     alpha=0.15, color=COLORS["hydro"], step="pre")
+
+    if "V_aval_hm3" in df_res.columns:
+        ax2.plot(hours, df_res["V_aval_hm3"],
+                 color="#0369A1", linewidth=2,
+                 linestyle="--", label="Bassin aval (Hm³)",
+                 drawstyle="steps-pre")
+
+    # Lignes de référence
+    ax2.axhline(HYDRO["reservoir"]["level_env_min_hm3"],
+                color="orange", linewidth=1.5, linestyle=":",
+                label=f"Min env. amont ({HYDRO['reservoir']['level_env_min_hm3']} Hm³)")
+    ax2.axhline(HYDRO["reservoir"]["level_max_hm3"],
+                color="red", linewidth=1, linestyle="--", alpha=0.5,
+                label=f"Max amont ({HYDRO['reservoir']['level_max_hm3']} Hm³)")
+    ax2.axhline(HYDRO["reservoir"]["level_initial_hm3"],
+                color="gray", linewidth=1, linestyle=":",
+                label=f"Niveau initial ({HYDRO['reservoir']['level_initial_hm3']} Hm³)")
+
+    # Niveau cible fin de journée
+    if HYDRO["reservoir"].get("level_target_hm3"):
+        ax2.axhline(HYDRO["reservoir"]["level_target_hm3"],
+                    color="green", linewidth=1.5, linestyle="-.",
+                    label=f"Cible fin J ({HYDRO['reservoir']['level_target_hm3']} Hm³)")
+
+    ax2.set_ylabel("Volume (Hm³)")
+    ax2.set_title("Niveaux des Réservoirs", loc="left", fontsize=11)
+    ax2.legend(loc="upper right", ncol=2, fontsize=8)
+
+    # ── Panneau 3 : apports naturels ──────────────────────────────────────
+    if "hydro_inflow_hm3" in df_res.columns:
+        inflow = df_res["hydro_inflow_hm3"].values
+        ax3.bar(hours, inflow, width=0.22,
+                color="#0EA5E9", alpha=0.8, label="Apports naturels (Hm³)")
+        ax3.set_ylabel("Apport (Hm³/slot)")
+        ax3.set_title("Apports Naturels (Précipitations → Ruissellement)",
+                      loc="left", fontsize=10)
+
+        total_inflow = sum(inflow)
+        ax3.text(0.98, 0.90,
+                 f"Total : {total_inflow:.4f} Hm³\n"
+                 f"≈ {total_inflow * HYDRO['mwh_per_hm3']:.1f} MWh potentiels",
+                 transform=ax3.transAxes, fontsize=8,
+                 ha="right", va="top",
+                 bbox=dict(boxstyle="round,pad=0.3",
+                           facecolor="white", alpha=0.8))
+    else:
+        ax3.text(0.5, 0.5, "Données de précipitation indisponibles",
+                 transform=ax3.transAxes, ha="center", va="center",
+                 fontsize=10, color="gray")
+
+    ax3.set_xlabel("Heure de la journée")
+    ax3.xaxis.set_major_formatter(FuncFormatter(_format_hour))
+    ax3.set_xlim(-0.25, 24)
+    ax3.set_xticks(range(0, 25, 2))
+
+    plt.tight_layout()
+    _save(fig, output_dir, "07_hydro_advanced")
 '''
 # ─────────────────────────────────────────────
 # UTILITAIRE : SAUVEGARDE
@@ -749,6 +903,7 @@ def run_visualization(
     plot_battery(df_res, output_dir)
     plot_pnl(df_res, output_dir)
     plot_merit_order(df_res, df_opt, output_dir)
+    plot_hydro(df_res, output_dir)  
 
     print("=" * 60)
     print(f"VISUALISATION TERMINÉE — 6 figures dans {output_dir}/")
