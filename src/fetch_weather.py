@@ -277,6 +277,42 @@ def compute_solar_power(radiation_wm2 : pd.Series) -> pd.Series:
 
     return power
 
+def compute_hydro_inflow(precipitation_mm: pd.Series) -> pd.Series:
+    """
+    Convertit les précipitations (mm/slot) en apports au réservoir (Hm³/slot).
+
+    Formule :
+      apport (Hm³) = précipitation (mm) × surface_bassin (km²)
+                     × coefficient_ruissellement / 1000
+
+    Conversion des unités :
+      1 mm × 1 km² = 1000 m³ = 0.001 Hm³
+      → apport (Hm³) = pluie_mm × surface_km2 × runoff / 1000
+
+    Exemple :
+      pluie = 2 mm/slot, surface = 150 km², runoff = 0.35
+      → apport = 2 × 150 × 0.35 / 1000 = 0.105 Hm³/slot
+
+    Note : Open-Meteo retourne la précipitation en mm cumulés
+    sur les 15 minutes précédentes → on l'utilise directement
+    sans conversion temporelle supplémentaire.
+    """
+    from config import HYDRO
+
+    catchment = HYDRO["catchment_area_km2"]    # 150 km²
+    runoff    = HYDRO["runoff_coefficient"]    # 0.35
+
+    inflow_hm3 = precipitation_mm * catchment * runoff / 1000
+    inflow_hm3 = inflow_hm3.clip(lower=0.0)   # pas d'apport négatif
+    inflow_hm3.name = "hydro_inflow_hm3"
+
+    total_hm3  = inflow_hm3.sum()
+    total_mwh  = total_hm3 * HYDRO["mwh_per_hm3"]
+
+    print(f"  Apports hydro : {total_hm3:.4f} Hm³/jour  |  "
+          f"équivalent {total_mwh:.1f} MWh potentiels")
+
+    return inflow_hm3
 
 # ─────────────────────────────────────────────
 # FONCTION PRINCIPALE
@@ -299,6 +335,7 @@ def fetch_weather_power(
     - temperature     : °C
     - wind_power_mw   : MW  ← borne sup éolien pour l'optimiseur
     - solar_power_mw  : MW  ← borne sup solaire pour l'optimiseur
+    - hyrdo_inflow_hm3 
     """
 
     response = fetch_raw_weather(target_date, location)
@@ -306,13 +343,15 @@ def fetch_weather_power(
 
     df["wind_power_mw"]  = compute_wind_power(df["wind_speed_80m"])
     df["solar_power_mw"] = compute_solar_power(df["direct_radiation"])
-    
+    df["hydro_inflow_hm3"] = compute_hydro_inflow(df["precipitation"])
 
     print("\n[Weather Power] Production estimée sur la journée :")
     print(f"  Éolien  : {df['wind_power_mw'].mean():.1f} MW moy  |  "
           f"{df['wind_power_mw'].sum() * 0.25:.0f} MWh")
     print(f"  Solaire : {df['solar_power_mw'].mean():.1f} MW moy  |  "
           f"{df['solar_power_mw'].sum() * 0.25:.0f} MWh")
+    print(f"  Hydro : {df['hydro_inflow_hm3'].mean():.6f} Hm³/jour   |  "
+          f"{df['hydro_inflow_hm3'].sum() * 0.25:.6f} MWh")
     # × 0.25 car chaque slot = 15min = 0.25h
 
     return df
@@ -339,5 +378,6 @@ if __name__ == "__main__":
     df = fetch_weather_power()
     print("\nAperçu des données météo + puissance :")
     print(df[["slot", "date", "wind_speed_80m",
-              "direct_radiation", "wind_power_mw", "solar_power_mw"]].to_string())
+              "direct_radiation", "wind_power_mw",
+              "solar_power_mw", "hydro_inflow_hm3"]].to_string())  # ← ajouté
     save_weather(df)
