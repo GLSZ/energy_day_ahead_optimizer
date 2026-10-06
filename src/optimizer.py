@@ -628,6 +628,26 @@ def solve(prob: pulp.LpProblem) -> str:
             f"Le solver n'a pas trouvé de solution optimale : {status}\n"
             "Vérifie les contraintes (rampes, must-run, budget hydro)."
         )
+
+    if status == "Infeasible":
+        # ── Diagnostic de faisabilité ─────────────────────────────────────
+        # Affiche les contraintes qui pourraient être en conflit
+        print("\n[DEBUG] Analyse des contraintes potentiellement en conflit :")
+
+        # Regroupe par préfixe pour identifier le groupe problématique
+        constraint_groups = {}
+        for name in prob.constraints:
+            prefix = name.split("_")[0] + "_" + name.split("_")[1] \
+                     if "_" in name else name
+            constraint_groups[prefix] = constraint_groups.get(prefix, 0) + 1
+
+        print("  Groupes de contraintes dans le modèle :")
+        for group, count in sorted(constraint_groups.items()):
+            print(f"    {group:<35} : {count} contraintes")
+
+        raise RuntimeError(
+            f"Le solver n'a pas trouvé de solution optimale : {status}\n"
+        )
     
     print(f"[SOLVE] Profit optimal : {pulp.value(prob.objective):,.2f} €")
     return status
