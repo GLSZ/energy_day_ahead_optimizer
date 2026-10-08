@@ -144,20 +144,21 @@ HYDRO = {
                                         #        (sécurité barrage)
         "level_max_hm3"     : 47.5,    # Hm³ — niveau maximum exploitation
                                         #        (2.5 Hm³ de marge sécurité)
-        "level_env_min_hm3" : 10.0,    # Hm³ — niveau minimum environnemental
+        "level_env_min_hm3" : 5.0,    # Hm³ — niveau minimum environnemental
                                         #        (débit réservé, directive cadre eau)
-        "level_initial_hm3" : 30.0,    # Hm³ — niveau au début de la journée
-        "level_target_hm3"  : 28.0,    # Hm³ — niveau cible fin de journée
+        "level_initial_hm3" : 35.0,    # Hm³ — niveau au début de la journée
+        "level_target_hm3"  : None, #28.0,    # Hm³ — niveau cible fin de journée
                                         #        (peut être None = libre)
     },
 
     # ── Bassin aval (réservoir STEP basse) ───────────────────────────────
     "lower_basin" : {
         "capacity_hm3"      : 10.0,    # Hm³ — plus petit que l'amont
-        "level_min_hm3"     : 1.0,     # Hm³ — minimum absolu
+        "level_min_hm3"     : 0.5,     # Hm³ — minimum absolu
         "level_max_hm3"     : 9.5,     # Hm³ — maximum exploitation
-        "level_env_min_hm3" : 2.0,     # Hm³ — minimum environnemental aval
-        "level_initial_hm3" : 5.0,     # Hm³ — niveau initial
+        "level_env_min_hm3" : 0.5,     # Hm³ — minimum environnemental aval
+        "level_initial_hm3" : 3.0,     # Hm³ — niveau initial
+        "spillage_max_hm3_per_slot" : 0.15, # Hm³/slot — déversement autorisé
     },
 
     # ── Conversion hydraulique ────────────────────────────────────────────
@@ -235,4 +236,4 @@ HOURS = list(range(TIME_HORIZON))
 # Part de marché du portefeuille sur la demande française
 # Engie représente ~15-20% de la production française
 # On modélise ici un portefeuille de taille intermédiaire
-MARKET_SHARE = 0.10   # 10% de la demande France → contrainte réaliste
+MARKET_SHARE = 0.20   # 10% de la demande France → contrainte réaliste

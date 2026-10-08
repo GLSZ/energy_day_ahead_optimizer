@@ -105,7 +105,8 @@ def load_weather(data_dir: str = "data/raw") -> pd.DataFrame:
     cols_keep = [
     "slot", "datetime",
     "wind_speed_80m", "direct_radiation",
-    "temperature_2m", "wind_power_mw", "solar_power_mw"
+    "temperature_2m", "wind_power_mw", "solar_power_mw",
+    "hydro_inflow_hm3"
     ]
     cols_keep = [c for c in cols_keep if c in df.columns]
     df = df[cols_keep].copy()

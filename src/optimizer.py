@@ -398,6 +398,16 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
     # où Q_turb(t) = P_hydro(t) × SLOT_DURATION_H / mwh_per_hm3
     #    Q_pompe(t) = P_pump(t) × SLOT_DURATION_H × hm3_per_mwh_pump
 
+    # Variable de déversement bassin aval (Hm³/slot)
+    Q_spill = {}
+    for t in SLOTS:
+        Q_spill[t] = pulp.LpVariable(
+            name     = f"Q_spill_{t}",
+            lowBound = 0,
+            upBound  = HYDRO["lower_basin"].get("spillage_max_hm3_per_slot", 0.15),
+            cat      = "Continuous",
+        )
+
     for t in SLOTS[:-1]:
         q_turb_t   = P["hydro"][t] * SLOT_DURATION_H / mwh_per_hm3
         q_apport_t = df["hydro_inflow_hm3"].iloc[t]
@@ -421,6 +431,11 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
             q_arrive_t = P["hydro"][t_source] * SLOT_DURATION_H / mwh_per_hm3
         else:
             q_arrive_t = 0.0   # pas encore arrivé au début de journée
+            prob += (
+                P_pump[t] == 0.0,
+                f"Hydro_pump_blocked_{t}",
+            )
+
 
         prob += (
             V_aval[t+1] == V_aval[t]
@@ -458,34 +473,38 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
         )
         c3_count += 1
 
-    # ── C3g : Anti-simultanéité turbinage / pompage ───────────────────────
-    #
-    # On ne peut pas turbiner et pomper en même temps sur le même ouvrage.
-    # En LP pur (sans variable binaire), on ajoute une contrainte de somme :
-    #   P_hydro(t) × SLOT_DURATION_H / mwh_per_hm3 + P_pump(t) ≤ max(turb, pump)
-    #
-    # C'est une approximation — la vraie contrainte nécessiterait du MIP.
-    # En pratique, le prix de l'électricité guide naturellement l'arbitrage :
-    # prix haut → turbinage, prix bas → pompage.
+    # C3g : Capacités max turbinage et pompage séparées
+    # On supprime l'ancienne contrainte de somme (trop restrictive)
+    # et on pose simplement les bornes individuelles sur chaque équipement.
+    # Le turbinage et le pompage utilisent des équipements distincts sur
+    # une STEP → pas besoin de les contraindre ensemble en LP pur.
 
-    max_combined = max(
-        HYDRO["step"]["turb_capacity_mw"],
-        HYDRO["step"]["pump_capacity_mw"],
-    )
     for t in SLOTS:
         prob += (
-            P["hydro"][t] + P_pump[t] <= max_combined,
-            f"Hydro_no_simultaneous_{t}",
+            P["hydro"][t] <= HYDRO["step"]["turb_capacity_mw"],   # 120 MW max turb
+            f"Hydro_turb_cap_{t}",
         )
-        c3_count += 1
+        prob += (
+            P_pump[t] <= HYDRO["step"]["pump_capacity_mw"],       # 100 MW max pompe
+            f"Hydro_pump_cap_{t}",
+        )
+        c3_count += 2
 
     n_constraints += c3_count
     print(f"[LP] C3 Hydro avancé : {c3_count} contraintes")
     print(f"     Débit réservé    : {min_flow:.4f} Hm³/slot "
           f"→ {min_power_env:.1f} MW min")
     print(f"     Délai écoulement : {flow_delay} slots ({flow_delay*15} min)")
-    print(f"     Pompage STEP max : {HYDRO['step']['pump_capacity_mw']} MW")
-    # ── C4 : Dynamique de la batterie (bilan d'énergie) ──────────────────
+    print(f"     Pompage STEP max : {HYDRO['step']['pump_capacity_mw']} MW")    # ── C4 : Dynamique de la batterie (bilan d'énergie) ──────────────────
+
+    '''
+    print(f"[DEBUG] V_res bounds : [{HYDRO['reservoir']['level_env_min_hm3']}, "
+        f"{HYDRO['reservoir']['level_max_hm3']}]")
+    print(f"[DEBUG] V_aval bounds : [{HYDRO['lower_basin']['level_env_min_hm3']}, "
+        f"{HYDRO['lower_basin']['level_max_hm3']}]")
+    print(f"[DEBUG] V_res initial : {HYDRO['reservoir']['level_initial_hm3']}")
+    print(f"[DEBUG] V_aval initial : {HYDRO['lower_basin']['level_initial_hm3']}")
+    '''
     #
     # L'état de charge évolue slot après slot selon :
     #
@@ -570,10 +589,10 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
 
     for t in SLOTS:
         demand_t  = df["demand_mw"].iloc[t]
-        borne_t   = demand_t * MARKET_SHARE
+        borne_t  = max(demand_t * MARKET_SHARE, nuclear_must_run + 50)
 
         # Garantit que la borne est toujours ≥ must-run nucléaire + marge
-        borne_t   = max(borne_t, nuclear_must_run + 50)
+        #borne_t   = max(borne_t, nuclear_must_run + 50)
 
         prob += (
             pulp.lpSum(P[asset][t] for asset in ASSETS_DISPATCH) <= borne_t,
@@ -591,7 +610,44 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
     print(f"[LP] Modèle prêt : {len(prob.variables())} variables, "
           f"{len(prob.constraints)} contraintes")
 
-    return prob, P, SOC, V_res, V_aval, P_pump
+
+    # ── Diagnostic de faisabilité manuelle ───────────────────────────────
+    print("\n[DEBUG] Vérification manuelle de faisabilité :")
+
+    # Volume exploitable réservoir amont sur la journée
+    v_init     = HYDRO["reservoir"]["level_initial_hm3"]       # 35
+    v_env_min  = HYDRO["reservoir"]["level_env_min_hm3"]       # 5
+    v_exploitable = (v_init - v_env_min) * HYDRO["mwh_per_hm3"]  # Hm³ → MWh
+    print(f"  Réservoir amont exploitable : "
+          f"{v_init - v_env_min:.1f} Hm³ = {v_exploitable:.0f} MWh")
+
+    # Débit réservé sur toute la journée
+    debit_total = min_flow * N_SLOTS * HYDRO["mwh_per_hm3"]
+    print(f"  Débit réservé journalier    : "
+          f"{min_flow * N_SLOTS:.4f} Hm³ = {debit_total:.1f} MWh obligatoires")
+
+    # Reste disponible pour la production
+    reste = v_exploitable - debit_total
+    print(f"  Reste pour production       : {reste:.0f} MWh")
+
+    # Vérification bassin aval
+    v_aval_init    = HYDRO["lower_basin"]["level_initial_hm3"]    # 3
+    v_aval_env_min = HYDRO["lower_basin"]["level_env_min_hm3"]    # 0.5
+    v_aval_max     = HYDRO["lower_basin"]["level_max_hm3"]        # 9.5
+    print(f"  Bassin aval : init={v_aval_init} Hm³  "
+          f"min={v_aval_env_min} Hm³  max={v_aval_max} Hm³")
+    print(f"  Capacité aval disponible    : "
+          f"{v_aval_max - v_aval_init:.1f} Hm³ pour recevoir l'eau turbinée")
+
+    # Eau turbinée maximale sur la journée si production à plein
+    q_turb_max = (HYDRO["step"]["turb_capacity_mw"]
+                  * N_SLOTS * SLOT_DURATION_H / HYDRO["mwh_per_hm3"])
+    print(f"  Eau turbinée si pleine capa : {q_turb_max:.2f} Hm³/jour")
+    print(f"  Bassin aval peut recevoir   : "
+          f"{v_aval_max - v_aval_init:.2f} Hm³ "
+          f"({'OK' if v_aval_max - v_aval_init >= q_turb_max else 'TROP PETIT ← PROBLÈME'})")
+
+    return prob, P, SOC, V_res, V_aval, P_pump, Q_spill
 
 '''
 # ─────────────────────────────────────────────
@@ -615,40 +671,26 @@ def solve(prob: pulp.LpProblem) -> str:
     - "Optimal" est le cas normal
     """
     print("\n[SOLVE] Lancement du solver CBC...")
-    
-    #SOLVER = "PULP_CBC_CMD"
-    solver = pulp.getSolver(SOLVER, msg = False) #msg=False = pas de log verbeux
+    solver = pulp.PULP_CBC_CMD(msg=True)   # msg=True → affiche les logs CBC
     prob.solve(solver)
 
     status = pulp.LpStatus[prob.status]
-    print(f"[SOLVE] Status : {status}")
-
-    if status != "Optimal":
-        raise RuntimeError(
-            f"Le solver n'a pas trouvé de solution optimale : {status}\n"
-            "Vérifie les contraintes (rampes, must-run, budget hydro)."
-        )
+    print(f"[SOLVE] Statut : {status}")
 
     if status == "Infeasible":
-        # ── Diagnostic de faisabilité ─────────────────────────────────────
-        # Affiche les contraintes qui pourraient être en conflit
-        print("\n[DEBUG] Analyse des contraintes potentiellement en conflit :")
-
-        # Regroupe par préfixe pour identifier le groupe problématique
-        constraint_groups = {}
+        print("\n[DEBUG] Nombre de contraintes par groupe :")
+        groups = {}
         for name in prob.constraints:
-            prefix = name.split("_")[0] + "_" + name.split("_")[1] \
-                     if "_" in name else name
-            constraint_groups[prefix] = constraint_groups.get(prefix, 0) + 1
-
-        print("  Groupes de contraintes dans le modèle :")
-        for group, count in sorted(constraint_groups.items()):
-            print(f"    {group:<35} : {count} contraintes")
+            parts  = name.split("_")
+            prefix = "_".join(parts[:3])
+            groups[prefix] = groups.get(prefix, 0) + 1
+        for g, c in sorted(groups.items()):
+            print(f"  {g:<40} : {c}")
 
         raise RuntimeError(
-            f"Le solver n'a pas trouvé de solution optimale : {status}\n"
+            f"Le solver n'a pas trouvé de solution optimale : {status}"
         )
-    
+
     print(f"[SOLVE] Profit optimal : {pulp.value(prob.objective):,.2f} €")
     return status
 
@@ -733,6 +775,7 @@ def extract_results(
         row["V_res_hm3"]    = round(pulp.value(V_res[t])  or 0.0, 4)
         row["V_aval_hm3"]   = round(pulp.value(V_aval[t]) or 0.0, 4)
         row["P_pump_mw"]    = round(pulp.value(P_pump[t])  or 0.0, 3)
+        row["Q_spill_hm3"] = round(pulp.value(Q_spill[t]) or 0.0, 4)
 
         results.append(row)
 
@@ -792,9 +835,9 @@ def run_optimization(data_dir: str = "data/processed") -> pd.DataFrame:
     print("=" * 60)
 
     df               = load_optimizer_input(data_dir)
-    prob, P, SOC, V_res, V_aval, P_pump = build_lp_model(df)
+    prob, P, SOC, V_res, V_aval, P_pump, Q_spill = build_lp_model(df)
     status           = solve(prob)
-    results_df = extract_results(df, P, SOC, V_res, V_aval, P_pump)
+    results_df = extract_results(df, P, SOC, V_res, V_aval, P_pump, Q_spill)
     save_results(results_df, data_dir)
 
     print("=" * 60)
