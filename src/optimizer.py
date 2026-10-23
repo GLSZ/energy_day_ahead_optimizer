@@ -55,6 +55,16 @@ ASSETS_DISPATCH = ["nuclear", "gas", "hydro", "wind", "solar", "battery"]
 # nuclear (12€) < hydro (5€) < wind (0€) < solar (0€) < battery (2€) < gas (93€)
 # Note : hydro et renouvelables passent devant le gaz en merit order réel
 
+# BUGFIX : les noms courts de ASSETS_DISPATCH ne correspondent pas tous
+# aux clés de config.ASSETS ("gas" -> "gas_ccgt", "hydro" -> "hydro_reservoir").
+# Sans ce mapping, ASSETS[asset] échoue silencieusement (asset in ASSETS
+# est False) et P_gas/P_hydro sont créées avec capacity_min=capacity_max=0,
+# ce qui les bloque à 0 MW sur tous les slots.
+ASSET_CONFIG_KEY = {
+    "gas": "gas_ccgt",
+    "hydro": "hydro_reservoir",
+}
+
 '''
 # ─────────────────────────────────────────────
 # 1. CHARGEMENT DES DONNÉES
@@ -87,14 +97,30 @@ def load_optimizer_input(data_dir: str = "data/processed") -> pd.DataFrame:
 # ─────────────────────────────────────────────
 '''
 
-def build_lp_model(df: pd.DataFrame) -> tuple:
+def build_lp_model(df: pd.DataFrame, price_column: str = "da_price_forecast_eur_mwh") -> tuple:
     """
     Construit le problème LP PuLP complet.
 
-    Retourne : (prob, P, SOC)
-      prob : objet LpProblem PuLP (le modèle)
-      P    : dict[asset][slot] → variable de décision puissance (MW)
-      SOC  : dict[slot] → variable état de charge batterie (MWh)
+    Paramètre `price_column` : quelle colonne de prix alimente la
+    fonction objectif (la DÉCISION du dispatch). Deux usages légitimes
+    coexistent pour ce projet de backtesting (TARGET_DATE est toujours
+    une date passée, donc les deux colonnes sont réellement disponibles) :
+      - "da_price_forecast_eur_mwh" (défaut) : dispatch RÉALISTE, décidé
+        avec uniquement l'information qu'un opérateur aurait réellement
+        eue avant la clôture de l'enchère day-ahead.
+      - "da_price_eur_mwh" : dispatch à CONNAISSANCE PARFAITE, décidé
+        comme si le prix de clôture était déjà connu (légitime pour
+        modéliser une décision prise APRÈS la clôture de l'enchère,
+        ou comme borne théorique de performance). Voir
+        run_optimization() qui calcule les deux et affiche l'écart.
+
+    Retourne : (prob, P, SOC, V_res, V_aval, P_pump, Q_spill, U_gas, Start_gas)
+      prob      : objet LpProblem PuLP (le modèle)
+      P         : dict[asset][slot] → variable de décision puissance (MW)
+      SOC       : dict[slot] → variable état de charge batterie (MWh)
+      U_gas     : dict[slot] → variable binaire marche/arrêt du CCGT
+      Start_gas : dict[slot] → variable continue indicateur de démarrage
+                  (définie pour tous les slots, état initial = éteint)
 
     Structure PuLP :
       LpVariable      = variable de décision (ce que le solver optimise)
@@ -103,12 +129,13 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
     """
 
     # ── Initialisation du problème ────────────────────────────────────────
-    # LpMaximize = on cherche à MAXIMISER la fonction objectif (profit)  
+    # LpMaximize = on cherche à MAXIMISER la fonction objectif (profit)
+    scenario_suffix = "forecast" if price_column == "da_price_forecast_eur_mwh" else "perfect_foresight"
     prob = pulp.LpProblem(
-        name = f"day_ahead_dispatch_{TARGET_DATE}",
+        name = f"day_ahead_dispatch_{TARGET_DATE}_{scenario_suffix}",
         sense = pulp.LpMaximize,
     )
-    print("[LP] Initialisation du modèle PuLP...")
+    print(f"[LP] Initialisation du modèle PuLP... (scénario : {scenario_suffix}, prix = {price_column})")
 
     # ── Variables de décision : puissance par actif et par slot ───────────
     #
@@ -125,7 +152,8 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
 
     for asset in ASSETS_DISPATCH:
         P[asset] = {}
-        cfg = ASSETS[asset] if asset in ASSETS else {}
+        config_key = ASSET_CONFIG_KEY.get(asset, asset)
+        cfg = ASSETS[config_key] if config_key in ASSETS else {}
 
         p_lo = cfg.get("capacity_min", 0)
         p_hi = cfg.get("capacity_max", 0)
@@ -137,6 +165,49 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
                 upBound = p_hi,
                 cat = "Continuous",
             )
+
+    # ── Unit commitment minimal pour le gaz (CCGT) ─────────────────────────
+    #
+    # U_gas[t] ∈ {0,1} : la centrale est-elle allumée (committed) au slot t ?
+    # Start_gas[t] ∈ [0,1] (continue, pas binaire) : indicateur de démarrage
+    # au slot t. On n'a pas besoin de la forcer binaire : comme son seul
+    # rôle est de porter un COÛT dans une fonction objectif qu'on MAXIMISE,
+    # le solveur la pousse toujours vers sa borne basse autorisée par
+    # Start_gas[t] ≥ U_gas[t] - U_gas[t-1], donc elle vaut exactement
+    # max(0, U_gas[t]-U_gas[t-1]) à l'optimum — c'est la linéarisation
+    # standard d'un coût de démarrage en MIP, sans ajouter de binaire
+    # supplémentaire.
+    #
+    # Hypothèses validées explicitement (pas d'invention silencieuse) :
+    #   - État avant le slot 0 = ÉTEINT (u_initial=0). Un démarrage est
+    #     donc bien compté (et facturé) si le modèle choisit de faire
+    #     tourner le gaz dès le premier slot de la journée — sans cette
+    #     règle, un test a montré que le solveur pouvait toujours éviter
+    #     tout coût de démarrage en se déclarant "allumé" gratuitement
+    #     dès minuit (faille corrigée ici, voir discussion).
+    #   - Puissance minimale technique quand allumé = 0 (valeur actuelle
+    #     de capacity_min dans config.py, pas de palier de charge minimal
+    #     ajouté) → U_gas ne contraint que le PLAFOND de P_gas, pas de
+    #     plancher supplémentaire.
+    #   - Durée minimale de marche/arrêt : NON implémentée (hors périmètre
+    #     de cette extension minimale, aucune donnée disponible pour ça).
+
+    gas_cfg = ASSETS[ASSET_CONFIG_KEY.get("gas", "gas")]
+    gas_capacity_max = gas_cfg["capacity_max"]
+    gas_startup_cost = gas_cfg["startup_cost"]
+
+    U_gas = {}
+    for t in SLOTS:
+        U_gas[t] = pulp.LpVariable(name=f"U_gas_{t}", cat="Binary")
+
+    Start_gas = {}
+    for t in SLOTS:
+        Start_gas[t] = pulp.LpVariable(
+            name=f"Start_gas_{t}", lowBound=0, upBound=1, cat="Continuous"
+        )
+
+    print(f"[LP] Unit commitment gaz : {N_SLOTS} variables binaires U_gas "
+          f"+ {N_SLOTS} variables de démarrage Start_gas (état initial = éteint)")
 
     # ── Variable d'état de charge batterie SOC(t) ─────────────────────────
     #
@@ -190,17 +261,31 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
 
     # Construction de la somme de profit sur tous les slots et actifs
     # PuLP supporte lpSum() pour les grandes sommes → plus efficace que +=
+    #
+    # `price_column` sélectionne la DÉCISION modélisée (voir docstring
+    # de build_lp_model) :
+    #   - "da_price_forecast_eur_mwh" -> dispatch réaliste (avant clôture)
+    #   - "da_price_eur_mwh"          -> dispatch à connaissance parfaite
+    #                                    (après clôture / borne théorique)
+    # Le prix réalisé est, dans tous les cas, celui utilisé par
+    # extract_results() pour évaluer le P&L a posteriori — voir
+    # run_optimization() pour le calcul des deux scénarios et leur écart.
     profit_terms = []
     for t in SLOTS:
-        price_t = df["da_price_eur_mwh"].iloc[t]   # €/MWh au slot
+        price_t = df[price_column].iloc[t]   # €/MWh au slot, selon le scénario
         for asset in ASSETS_DISPATCH:
             margin = price_t - marginal_costs[asset] # marge unitaire €/MWh
             profit_terms.append(
                 margin * P[asset][t] * SLOT_DURATION_H # €/MWh
             )
 
-    # L'objectif est la somme de toutes ces marges
-    prob += pulp.lpSum(profit_terms), "Profit_total_EUR"
+    # Coût de démarrage du gaz (unit commitment minimal) : pénalise chaque
+    # démarrage détecté par Start_gas[t] (voir création des variables plus
+    # haut), y compris au slot 0 (état initial = éteint, voir hypothèses).
+    startup_terms = [-gas_startup_cost * Start_gas[t] for t in SLOTS]
+
+    # L'objectif est la somme des marges moins les coûts de démarrage
+    prob += pulp.lpSum(profit_terms + startup_terms), "Profit_total_EUR"
 
     print(f"[LP] Fonction objectif définie ({len(profit_terms)} termes)")   
 
@@ -233,7 +318,43 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
         )
         n_constraints += 2
 
-    print(f"[LP] C1 Bornes renouvelables : {n_constraints} contraintes")  
+    print(f"[LP] C1 Bornes renouvelables : {n_constraints} contraintes")
+
+    # ── C1bis : Unit commitment gaz — liaison P_gas / U_gas / Start_gas ────
+    #
+    # Plafond de production lié à l'état marche/arrêt :
+    #   P_gas[t] ≤ capacity_max × U_gas[t]
+    # (pas de plancher ajouté : Pmin technique = 0, décision validée)
+    #
+    # Détection de démarrage (linéarisation standard, voir création des
+    # variables) :
+    #   Start_gas[t] ≥ U_gas[t] - U_gas[t-1]   pour t ≥ 1
+    #   Start_gas[0] ≥ U_gas[0] - 0            (état initial = éteint)
+
+    c1bis_count = 0
+    for t in SLOTS:
+        prob += (
+            P["gas"][t] <= gas_capacity_max * U_gas[t],
+            f"Gas_UC_capacity_link_{t}",
+        )
+        c1bis_count += 1
+
+    U_GAS_INITIAL = 0  # état avant le slot 0 : éteint (hypothèse validée)
+    prob += (
+        Start_gas[0] >= U_gas[0] - U_GAS_INITIAL,
+        "Gas_UC_startup_link_0",
+    )
+    c1bis_count += 1
+
+    for t in SLOTS[1:]:
+        prob += (
+            Start_gas[t] >= U_gas[t] - U_gas[t - 1],
+            f"Gas_UC_startup_link_{t}",
+        )
+        c1bis_count += 1
+
+    n_constraints += c1bis_count
+    print(f"[LP] C1bis Unit commitment gaz : {c1bis_count} contraintes")
 
     # ── C2 : Contraintes de rampe ─────────────────────────────────────────
     #
@@ -436,11 +557,21 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
                 f"Hydro_pump_blocked_{t}",
             )
 
+        q_spill_t = Q_spill[t]
 
+        # BUGFIX : Q_spill était créée (bornes définies plus haut) mais
+        # jamais soustraite ici → variable sans aucun effet sur le modèle.
+        # Le bassin aval n'avait alors aucun exutoire autre que le pompage,
+        # ce qui le force à dépasser sa borne haute (level_max_hm3) dès que
+        # l'eau turbinée arrive plus vite qu'elle n'est repompée → Infeasible.
+        # Q_spill représente un déversement hors circuit (déversoir de
+        # sécurité) : c'est une perte nette pour le bassin aval, au même
+        # titre que le pompage.
         prob += (
             V_aval[t+1] == V_aval[t]
                          + q_arrive_t    # eau arrivant de l'amont
-                         - q_pompe_t,   # eau remontée par la STEP
+                         - q_pompe_t     # eau remontée par la STEP
+                         - q_spill_t,    # eau déversée (hors circuit)
             f"Hydro_aval_balance_{t}",
         )
         c3_count += 2
@@ -580,19 +711,19 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
     # réduit la production nette et relâche naturellement la contrainte.
     #
     # Protection anti-infeasible : la borne ne peut pas descendre sous
-    # le must-run nucléaire (700 MW), sinon le LP devient infaisable.
+    # le must-run nucléaire + marge, sinon le LP devient infaisable.
+    # Valeur centralisée dans config.nuclear_must_run_mw() (Correction 5)
+    # — voir aussi visualize.py qui lit la même source pour tracer la
+    # ligne de référence sur la figure 2, afin d'éviter toute divergence.
 
-    from config import MARKET_SHARE
+    from config import MARKET_SHARE, nuclear_must_run_mw
 
-    nuclear_must_run = ASSETS["nuclear"]["capacity_min"]   # 700 MW
+    nuclear_must_run = nuclear_must_run_mw()
     c6_count = 0
 
     for t in SLOTS:
         demand_t  = df["demand_mw"].iloc[t]
-        borne_t  = max(demand_t * MARKET_SHARE, nuclear_must_run + 50)
-
-        # Garantit que la borne est toujours ≥ must-run nucléaire + marge
-        #borne_t   = max(borne_t, nuclear_must_run + 50)
+        borne_t  = max(demand_t * MARKET_SHARE, nuclear_must_run)
 
         prob += (
             pulp.lpSum(P[asset][t] for asset in ASSETS_DISPATCH) <= borne_t,
@@ -604,7 +735,7 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
     print(f"[LP] C6 Demande (share={MARKET_SHARE*100:.0f}%) : "
           f"{c6_count} contraintes  "
           f"(borne moy : {df['demand_mw'].mean() * MARKET_SHARE:,.0f} MW  "
-          f"min protégée : {nuclear_must_run + 50:,.0f} MW)")
+          f"min protégée : {nuclear_must_run:,.0f} MW)")
 
     print(f"\n[LP] Total contraintes : {n_constraints}")
     print(f"[LP] Modèle prêt : {len(prob.variables())} variables, "
@@ -647,7 +778,7 @@ def build_lp_model(df: pd.DataFrame) -> tuple:
           f"{v_aval_max - v_aval_init:.2f} Hm³ "
           f"({'OK' if v_aval_max - v_aval_init >= q_turb_max else 'TROP PETIT ← PROBLÈME'})")
 
-    return prob, P, SOC, V_res, V_aval, P_pump, Q_spill
+    return prob, P, SOC, V_res, V_aval, P_pump, Q_spill, U_gas, Start_gas
 
 '''
 # ─────────────────────────────────────────────
@@ -672,6 +803,7 @@ def solve(prob: pulp.LpProblem) -> str:
     """
     print("\n[SOLVE] Lancement du solver CBC...")
     solver = pulp.PULP_CBC_CMD(msg=True)   # msg=True → affiche les logs CBC
+    
     prob.solve(solver)
 
     status = pulp.LpStatus[prob.status]
@@ -691,6 +823,17 @@ def solve(prob: pulp.LpProblem) -> str:
             f"Le solver n'a pas trouvé de solution optimale : {status}"
         )
 
+    # BUGFIX : seul "Infeasible" était bloqué explicitement. Un statut
+    # "Unbounded" (fonction objectif non bornée — erreur de modélisation)
+    # ou "Not Solved"/"Undefined" passait silencieusement, affichait un
+    # "Profit optimal" trompeur, et laissait extract_results() lire des
+    # variables PuLP non résolues sans jamais être alerté. On bloque
+    # désormais tout statut différent de "Optimal".
+    if status != "Optimal":
+        raise RuntimeError(
+            f"Le solver n'a pas trouvé de solution optimale : {status}"
+        )
+
     print(f"[SOLVE] Profit optimal : {pulp.value(prob.objective):,.2f} €")
     return status
 
@@ -704,6 +847,12 @@ def extract_results(
     df: pd.DataFrame,
     P: dict,
     SOC: dict,
+    V_res: dict,
+    V_aval: dict,
+    P_pump: dict,
+    Q_spill: dict,
+    U_gas: dict,
+    Start_gas: dict,
 ) -> pd.DataFrame:
     """
     Transforme les variables de décision PuLP en DataFrame lisible.
@@ -712,28 +861,38 @@ def extract_results(
     - La puissance de chaque actif (MW)
     - L'énergie produite par chaque actif (MWh = MW × 0.25h)
     - Le SOC de la batterie (MWh)
+    - L'état marche/arrêt du gaz (u_gas) et son coût de démarrage éventuel
     - Le revenu brut (€)
-    - Le coût de production (€)
+    - Le coût de production (€, inclut maintenant le coût de démarrage gaz)
     - La marge nette (€)
 
     pulp.value(variable) → float : extrait la valeur optimale d'une LpVariable
     """
+    gas_startup_cost = ASSETS[ASSET_CONFIG_KEY.get("gas", "gas")]["startup_cost"]
 
     results = []
     for t in SLOTS:
+        # Prix RÉALISÉ : sert uniquement à évaluer le P&L a posteriori
+        # (revenue_eur, fuel_cost_eur, margin_eur ci-dessous). C'est le
+        # prix auquel le dispatch décidé par le LP a réellement été
+        # vendu/acheté sur le marché, indépendamment de ce qui a été
+        # prévu pour prendre la décision.
         price_t = df["da_price_eur_mwh"].iloc[t]
+        price_forecast_t = df["da_price_forecast_eur_mwh"].iloc[t] if "da_price_forecast_eur_mwh" in df.columns else None
 
         row = {
             "slot" : t,
             "datetime" : df["datetime"].iloc[t],
-            "da_price" : price_t
+            "da_price" : price_t,               # réalisé (évaluation)
+            "da_price_forecast" : price_forecast_t,  # prévu (décision)
         }
         if "demand_mw" in df.columns:
             row["demand_mw"] = df["demand_mw"].iloc[t]
 
         total_production_mw = 0.0
         total_revenue       = 0.0
-        total_fuel_cost     = 0.0     
+        total_fuel_cost     = 0.0
+        total_startup_cost  = 0.0
 
         for asset in ASSETS_DISPATCH:
             p_val = pulp.value(P[asset][t]) # MW optimal pour cet actif ce slot
@@ -767,11 +926,23 @@ def extract_results(
         else:            # charge → achat d'énergie (coût = prix DA × énergie chargée)
             total_fuel_cost += price_t * abs(bat_e)   # on paye pour charger
 
+        # Unit commitment gaz : état marche/arrêt + coût de démarrage.
+        # Start_gas existe pour tous les slots, y compris t=0 (état
+        # initial = éteint, voir build_lp_model).
+        u_gas_val = pulp.value(U_gas[t]) or 0.0
+        start_gas_val = pulp.value(Start_gas[t]) or 0.0
+        gas_startup_cost_t = gas_startup_cost * start_gas_val
+        total_startup_cost += gas_startup_cost_t
+
+        row["u_gas"] = round(u_gas_val)
+        row["start_gas"] = round(start_gas_val, 4)
+        row["gas_startup_cost_eur"] = round(gas_startup_cost_t, 2)
+
         row["soc_battery_mwh"] = round(pulp.value(SOC[t]) or 0.0, 3)
         row["total_prod_mw"]   = round(total_production_mw, 2)
         row["revenue_eur"]     = round(total_revenue, 2)
-        row["fuel_cost_eur"]   = round(total_fuel_cost, 2)
-        row["margin_eur"]      = round(total_revenue - total_fuel_cost, 2)
+        row["fuel_cost_eur"]   = round(total_fuel_cost + total_startup_cost, 2)
+        row["margin_eur"]      = round(total_revenue - total_fuel_cost - total_startup_cost, 2)
         row["V_res_hm3"]    = round(pulp.value(V_res[t])  or 0.0, 4)
         row["V_aval_hm3"]   = round(pulp.value(V_aval[t]) or 0.0, 4)
         row["P_pump_mw"]    = round(pulp.value(P_pump[t])  or 0.0, 3)
@@ -811,9 +982,10 @@ def extract_results(
 def save_results(
         results_df: pd.DataFrame,
         output_dir: str = "data/processed",
+        suffix: str = "",
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
-    filename = f"dispatch_results_{TARGET_DATE}.csv"
+    filename = f"dispatch_results_{TARGET_DATE}{suffix}.csv"
     filepath = os.path.join(output_dir, filename)
     results_df.to_csv(filepath, index=False)
     print(f"\n[SAVE] Résultats sauvegardés → {filepath}")
@@ -825,26 +997,80 @@ def save_results(
 # ─────────────────────────────────────────────
 '''
 
+def _run_single_scenario(df: pd.DataFrame, price_column: str, data_dir: str, suffix: str) -> pd.DataFrame:
+    """Construit, résout, extrait et sauvegarde un scénario de dispatch
+    pour une colonne de prix de décision donnée (voir build_lp_model)."""
+    prob, P, SOC, V_res, V_aval, P_pump, Q_spill, U_gas, Start_gas = build_lp_model(df, price_column=price_column)
+    solve(prob)
+    results_df = extract_results(df, P, SOC, V_res, V_aval, P_pump, Q_spill, U_gas, Start_gas)
+    save_results(results_df, data_dir, suffix=suffix)
+    return results_df
+
+
 def run_optimization(data_dir: str = "data/processed") -> pd.DataFrame:
     """
-    Pipeline complet :
-      load → build_model → solve → extract_results → save
+    Pipeline complet, calculé pour DEUX scénarios de décision côte à côte
+    (demande explicite : le prix réalisé est une décision légitime pour
+    un dispatch décidé APRÈS la clôture de l'enchère day-ahead, pas
+    seulement un biais à éliminer) :
+
+      1. "forecast"          : dispatch RÉALISTE, décidé avec la
+         prévision de prix (da_price_forecast_eur_mwh) — c'est le
+         dispatch opérationnel, sauvegardé sous le nom historique
+         dispatch_results_<date>.csv (compatibilité avec visualize.py).
+      2. "perfect_foresight"  : dispatch à CONNAISSANCE PARFAITE, décidé
+         avec le prix réalisé (da_price_eur_mwh) — borne théorique de
+         performance, sauvegardé sous dispatch_results_<date>_perfect_
+         foresight.csv.
+
+    Les deux scénarios sont évalués sur le MÊME prix réalisé dans
+    extract_results() (le P&L reflète toujours ce qui a réellement été
+    payé/perçu sur le marché) — seule la décision de dispatch diffère.
+
+    L'écart de marge entre les deux est le "coût de l'incertitude de
+    prévision" : la marge perdue par rapport à l'optimum théorique à
+    cause de l'imperfection de la prévision de prix.
+
+    Retourne le dispatch RÉALISTE (scénario 1), pour compatibilité avec
+    les appelants existants (main.py::step_optimize).
     """
     print("=" * 60)
     print(f"OPTIMISATION DAY-AHEAD — {TARGET_DATE}")
     print("=" * 60)
 
-    df               = load_optimizer_input(data_dir)
-    prob, P, SOC, V_res, V_aval, P_pump, Q_spill = build_lp_model(df)
-    status           = solve(prob)
-    results_df = extract_results(df, P, SOC, V_res, V_aval, P_pump, Q_spill)
-    save_results(results_df, data_dir)
+    df = load_optimizer_input(data_dir)
+
+    print("\n" + "─" * 60)
+    print("SCÉNARIO 1/2 — Dispatch réaliste (décision = prévision)")
+    print("─" * 60)
+    results_forecast = _run_single_scenario(
+        df, price_column="da_price_forecast_eur_mwh", data_dir=data_dir, suffix=""
+    )
+
+    print("\n" + "─" * 60)
+    print("SCÉNARIO 2/2 — Dispatch à connaissance parfaite (décision = prix réalisé)")
+    print("─" * 60)
+    results_perfect = _run_single_scenario(
+        df, price_column="da_price_eur_mwh", data_dir=data_dir, suffix="_perfect_foresight"
+    )
+
+    margin_forecast = results_forecast["margin_eur"].sum()
+    margin_perfect  = results_perfect["margin_eur"].sum()
+    gap_eur = margin_perfect - margin_forecast
+    gap_pct = (gap_eur / margin_perfect * 100) if margin_perfect != 0 else float("nan")
+
+    print("\n" + "=" * 60)
+    print("COMPARAISON DES DEUX SCÉNARIOS")
+    print("=" * 60)
+    print(f"  Marge réaliste (prévision)         : {margin_forecast:>14,.0f} €")
+    print(f"  Marge connaissance parfaite (borne): {margin_perfect:>14,.0f} €")
+    print(f"  Coût de l'incertitude de prévision : {gap_eur:>14,.0f} €  ({gap_pct:.1f}% de la borne théorique)")
 
     print("=" * 60)
     print("OPTIMISATION TERMINÉE")
     print("=" * 60)
 
-    return results_df
+    return results_forecast
 
 '''
 # ─────────────────────────────────────────────

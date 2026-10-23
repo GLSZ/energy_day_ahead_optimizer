@@ -288,9 +288,10 @@ def compute_gas_marginal_cost(
 def build_optimizer_input(
         df : pd.DataFrame,
         gas_srmc : float,
-        load_data: dict,   
+        load_data: dict,
+        price_forecast: pd.Series,
 ) -> pd.DataFrame:
-    
+
     """
     Enrichit le DataFrame aligné avec toutes les colonnes
     dont optimizer.py aura besoin.
@@ -313,6 +314,7 @@ def build_optimizer_input(
     │ battery_pmax           : +100 MW (décharge max)                 │
     │ ramp_up_[asset]        : rampe montante en MW/slot              │
     │ ramp_down_[asset]      : rampe descendante en MW/slot           │
+    │ da_price_forecast_eur_mwh : prévision de prix DA (voir plus bas)│
     └─────────────────────────────────────────────────────────────────┘
 
     Note sur la conversion des rampes MW/h → MW/slot :
@@ -320,10 +322,25 @@ def build_optimizer_input(
     Comme nos slots font 15min = 0.25h, la rampe par slot est :
         ramp_mw_per_slot = ramp_mw_per_hour × 0.25
     Ex : nucléaire ramp_up = 50 MW/h → 12.5 MW/slot
+
+    Note sur `da_price_forecast_eur_mwh` vs `da_price_eur_mwh` :
+    `da_price_eur_mwh` est le prix RÉALISÉ (déjà présent dans `df`,
+    issu de fetch_prices.py) — utilisé uniquement par optimizer.py
+    pour évaluer le P&L a posteriori (extract_results).
+    `da_price_forecast_eur_mwh` est la prévision (voir forecast_price.py)
+    — c'est la seule des deux que la fonction objectif du LP doit lire,
+    car c'est la seule donnée dont un opérateur day-ahead dispose
+    réellement au moment de décider son dispatch.
     """
 
     SLOT_DURATION_H = 0.25 # 15min = 0.25 heure
     out = df.copy()
+
+    # ── Prévision de prix DA (décision) vs prix réalisé (évaluation) ──────
+    # price_forecast est indexée 0..95 par slot (voir forecast_price.py).
+    # out a déjà un index 0..N-1 propre (reset_index dans align_series),
+    # on aligne donc par position (slot), pas par timestamp.
+    out["da_price_forecast_eur_mwh"] = price_forecast.reindex(out.index).values
 
     # ── Coûts marginaux ──────────────────────────────────────────────────
     # Ces valeurs sont constantes sur tous les slots de la journée
@@ -436,7 +453,8 @@ def validate_optimizer_input(df: pd.DataFrame) -> None:
 
     # Colonnes critiques pour le LP
     critical_cols = [
-        "da_price_eur_mwh",
+        "da_price_eur_mwh",            # réalisé — évaluation ex-post
+        "da_price_forecast_eur_mwh",   # prévision — décision du LP
         "gas_marginal_cost", "nuclear_marginal_cost",
         "nuclear_pmin", "nuclear_pmax",
         "gas_pmin",     "gas_pmax",
@@ -554,8 +572,15 @@ def run_preprocessing(
     ttf_price = fetch_ttf_price(TARGET_DATE)
     gas_srmc  = compute_gas_marginal_cost(ttf_price)
 
+    # Étape 3bis : prévision du prix DA (décision) — voir forecast_price.py
+    # Construite UNIQUEMENT à partir de prix réalisés strictement
+    # antérieurs à TARGET_DATE (aucune fuite temporelle possible).
+    import forecast_price
+    price_forecast = forecast_price.forecast_day_ahead_price(TARGET_DATE)
+    forecast_price.evaluate_forecast_quality(TARGET_DATE, price_forecast)
+
     # Étape 4 : construction DataFrame optimiseur
-    df_opt = build_optimizer_input(df, gas_srmc, load_data)
+    df_opt = build_optimizer_input(df, gas_srmc, load_data, price_forecast)
 
     # Étape 5 : validation
     validate_optimizer_input(df_opt)

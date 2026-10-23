@@ -279,11 +279,14 @@ def plot_dispatch(df_res: pd.DataFrame, output_dir: str):
     # Quand la production empilée touche cette ligne → contrainte active
     # Quand elle est en dessous → contrainte relâchée (ex: nuit)
     if "demand_mw" in df_res.columns:
-        from config import MARKET_SHARE
+        from config import MARKET_SHARE, nuclear_must_run_mw
         borne_demande = df_res["demand_mw"] * MARKET_SHARE
-        # Même protection anti-infeasible que dans optimizer.py
-        nuclear_must_run = 750   # 700 MW must-run + 50 MW de marge
-        borne_demande = borne_demande.clip(lower=nuclear_must_run)
+        # Même protection anti-infeasible que dans optimizer.py (C6) —
+        # valeur centralisée dans config.nuclear_must_run_mw() depuis la
+        # Correction 5 (était hardcodée à 750 ici, désynchronisée de la
+        # vraie valeur utilisée par le solveur après un changement de
+        # ASSETS["nuclear"]["capacity_min"]).
+        borne_demande = borne_demande.clip(lower=nuclear_must_run_mw())
 
         ax1.plot(
             hours, borne_demande.values,

@@ -18,31 +18,11 @@ Retourne une pd.Series de 96 valeurs (pas 15min) en MW.
 import os
 import sys
 import pandas as pd
-from pathlib import Path
 from datetime import timedelta
-from dotenv import load_dotenv
-from entsoe import EntsoePandasClient
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import TARGET_DATE, PRICE_ZONE
-
-#env_path = Path(__file__).parent.parent / "logs.env"
-env_path = Path(__file__).parent / "logs.env"
-load_dotenv(env_path)
-
-
-# ─────────────────────────────────────────────
-# AUTHENTIFICATION
-# ─────────────────────────────────────────────
-
-def get_client() -> EntsoePandasClient:
-    api_key = os.getenv("ENTSOE_API_KEY")
-    if not api_key:
-        raise EnvironmentError(
-            "Token ENTSO-E manquant. "
-            "Vérifie logs.env → ENTSOE_API_KEY=ton_token"
-        )
-    return EntsoePandasClient(api_key=api_key)
+from entsoe_client import get_client  # authentification centralisée (Correction 5)
 
 
 # ─────────────────────────────────────────────

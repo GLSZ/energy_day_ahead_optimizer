@@ -236,4 +236,26 @@ HOURS = list(range(TIME_HORIZON))
 # Part de marché du portefeuille sur la demande française
 # Engie représente ~15-20% de la production française
 # On modélise ici un portefeuille de taille intermédiaire
-MARKET_SHARE = 0.20   # 10% de la demande France → contrainte réaliste
+MARKET_SHARE = 0.30   # 10% de la demande France → contrainte réaliste
+
+# ─────────────────────────────────────────────
+# PROTECTION ANTI-INFEASIBLE — MUST-RUN NUCLÉAIRE
+# ─────────────────────────────────────────────
+# Centralisé ici (Correction 5) : était dupliqué entre optimizer.py
+# (contrainte C6) et visualize.py (ligne de référence sur la figure 2),
+# avec des valeurs qui avaient divergé (350 vs 750 MW) après un
+# changement de ASSETS["nuclear"]["capacity_min"] (700 → 300 MW) non
+# répercuté dans visualize.py. Les deux fichiers doivent désormais lire
+# nuclear_must_run_mw() plutôt que recalculer/recopier la valeur.
+
+NUCLEAR_MUST_RUN_SAFETY_MARGIN_MW = 50  # marge de sécurité anti-infeasible
+
+
+def nuclear_must_run_mw() -> float:
+    """
+    Borne plancher protégée pour la contrainte de demande (C6 dans
+    optimizer.py) : garantit que la part de marché ne descend jamais
+    sous le must-run nucléaire + une marge de sécurité, quel que soit
+    le niveau de demande.
+    """
+    return ASSETS["nuclear"]["capacity_min"] + NUCLEAR_MUST_RUN_SAFETY_MARGIN_MW

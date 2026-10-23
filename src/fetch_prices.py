@@ -1,31 +1,11 @@
-import pandas as pd 
-from dotenv import load_dotenv
-from pathlib import Path
-from entsoe import EntsoePandasClient
+import pandas as pd
 from datetime import timedelta
 import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import PRICE_ZONE, TARGET_DATE, LOCATION, HOURS
-
-env_path = Path(__file__).parent / "logs.env"
-load_dotenv(env_path)
-print(f"Path to .env : {env_path}")
-
-
-''' ─────────────────────────────────────────────'''
-# AUTHENTIFICATION
-# ─────────────────────────────────────────────
-
-def get_client() -> EntsoePandasClient:
-    api_key =  os.getenv("ENTSOE_API_KEY") # à mettre en place
-    print(api_key[0:5])
-    if not api_key:
-        raise EnvironmentError(
-            "Token manquant"
-        )
-    return EntsoePandasClient(api_key=api_key)
+from entsoe_client import get_client  # authentification centralisée (Correction 5)
 
 # ─────────────────────────────────────────────
 # EXTRACTION DES PRIX DAY-AHEAD
