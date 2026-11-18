@@ -40,7 +40,7 @@ energy-day-ahead-optimizer/
 ## Installation
 
 ```bash
-git clone https://github.com/ton-username/energy-day-ahead-optimizer.git
+git clone https://github.com/energy-day-ahead-optimizer.git
 cd energy-day-ahead-optimizer
 pip install -r requirements.txt
 cp logs.env.example logs.env
